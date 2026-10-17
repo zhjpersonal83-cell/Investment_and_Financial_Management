@@ -134,6 +134,7 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     key = commands.add_parser("key", help="Generate a read-only key bound to one existing user ID")
     key.add_argument("user_id", type=int)
+    key.add_argument("user_generation", help="Immutable GENERATION of the existing USERS row")
     backup = commands.add_parser("export", help="Export server data in pages of 100 without a login session")
     backup.add_argument("base_url", help="For example https://finance.example/Investment_and_Financial_Management")
     backup.add_argument("--output", type=Path, default=Path("user-data.json"))
@@ -143,9 +144,13 @@ def main():
     if args.command == "key":
         if args.user_id < 1 or args.user_id > 2147483647:
             parser.error("user_id must identify an existing user (positive int).")
+        try:
+            generation = str(__import__("uuid").UUID(args.user_generation))
+        except (ValueError, AttributeError):
+            parser.error("user_generation must be the existing user UUID generation.")
         token = secrets.token_urlsafe(32)
         print("Client API token (keep private): " + token)
-        print("Server IAFM_API_KEYS entry: " + str(args.user_id) + ":" + hashlib.sha256(token.encode("ascii")).hexdigest())
+        print("Server IAFM_API_KEYS entry: " + str(args.user_id) + ":" + generation + ":" + hashlib.sha256(token.encode("ascii")).hexdigest())
         return
     token = os.environ.get("IAFM_API_TOKEN") or getpass.getpass("API token: ")
     try:

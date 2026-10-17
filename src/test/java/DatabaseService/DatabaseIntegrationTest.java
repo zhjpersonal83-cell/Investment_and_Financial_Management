@@ -183,14 +183,12 @@ public class DatabaseIntegrationTest extends DatabaseInit {
         assertFalse(DatabaseService.Model.Controller.AssetsData.NonInvestmentAsset.EditAsset.editNonInvestmentAsset(2, 1, "Stolen", "DEMAND_DEPOSIT", LOW, "0.00", "GBP"));
         assertFalse(DatabaseService.Model.Controller.AssetsData.NonInvestmentAsset.DeleteAsset.deleteNonInvestmentAsset(2, 1));
         assertTrue(AddIncomeOrExpense.addIncomeOrExpense(1, "income", "Bank", "Pay", "5.00", TODAY));
-        assertFalse(DatabaseService.Model.Controller.AssetsData.NonInvestmentAsset.DeleteAsset.deleteNonInvestmentAsset(1, 1));
         assertFalse(DatabaseService.Model.Controller.AssetsData.NonInvestmentAsset.EditAsset.editNonInvestmentAsset(1, 1, "Bank", "DEMAND_DEPOSIT", LOW, "105.00", "CNY"));
         assertTrue(DatabaseService.Model.Controller.AssetsData.NonInvestmentAsset.EditAsset.editNonInvestmentAsset(1, 1, "Renamed", "DEMAND_DEPOSIT", LOW, "105.00", "GBP"));
         assertEquals("Renamed", ReadData.transactionsPage(1, new JSONObject()).getJSONArray("items").getJSONObject(0).getString("platform"));
-        int id = ReadData.transactionsPage(1, new JSONObject()).getJSONArray("items").getJSONObject(0).getInt("id");
-        assertTrue(DeleteIncomeOrExpense.deleteIncomeOrExpense(1, id, null, null, null));
-        assertEquals("100.00", value("ALL_NON_INVESTMENT_ASSETS", "AMOUNT", 1));
         assertTrue(DatabaseService.Model.Controller.AssetsData.NonInvestmentAsset.DeleteAsset.deleteNonInvestmentAsset(1, 1));
+        assertEquals(0, ReadData.transactionsPage(1, new JSONObject()).getLong("total"));
+        assertEquals("900.00", value("ALL_NON_INVESTMENT_ASSETS", "AMOUNT", 2));
     }
 
     @Test public void riskRetainsUninvestedCashAndFeesAreNotDeductedTwice() throws Exception {
@@ -204,7 +202,7 @@ public class DatabaseIntegrationTest extends DatabaseInit {
         assertEquals(3, risk.getJSONArray("riskDistribution").length());
     }
 
-    @Test public void sequenceInitializesFromLegacyIdsAndAllocatesUniquelyUnderConcurrency() throws Exception {
+    @Test public void sequenceReusesLegacyIdsAndAllocatesUniquelyUnderConcurrency() throws Exception {
         record(70, 1, "income", "unused synthetic platform", "0.01", "Existing");
         insert("INSERT INTO ID_RECORDER_INCOME_AND_EXPENDITURE_DATA (TABLE_ID) VALUES (95)");
         ExecutorService executor = Executors.newFixedThreadPool(8);
@@ -213,12 +211,20 @@ public class DatabaseIntegrationTest extends DatabaseInit {
             List<Future<List<Integer>>> futures = new ArrayList<>();
             for (int worker = 0; worker < 8; worker++) futures.add(executor.submit(() -> {
                 ready.await(); List<Integer> ids = new ArrayList<>();
-                for (int i = 0; i < 20; i++) ids.add(nextId("INCOME_AND_EXPENDITURE_DATA"));
+                for (int i = 0; i < 20; i++) try (Connection connection = openConnection()) {
+                    int id = nextId(connection, "INCOME_AND_EXPENDITURE_DATA");
+                    try (PreparedStatement statement = connection.prepareStatement(
+                            "INSERT INTO INCOME_AND_EXPENDITURE_DATA (ID,USER_ID,TYPE,PLATFORM,AMOUNT,NAME,CURRENCY,DATE) VALUES (?,1,'income','unused','0.01','Concurrent','GBP',?)")) {
+                        statement.setInt(1, id); statement.setDate(2, java.sql.Date.valueOf(TODAY)); statement.executeUpdate();
+                    }
+                    connection.commit(); ids.add(id);
+                }
                 return ids;
             }));
             ready.countDown(); Set<Integer> ids = new HashSet<>();
-            for (Future<List<Integer>> future : futures) for (int id : future.get(30, java.util.concurrent.TimeUnit.SECONDS)) { assertTrue(id > 95); assertTrue(ids.add(id)); }
-            assertEquals(160, ids.size()); assertEquals(256, nextId("INCOME_AND_EXPENDITURE_DATA"));
+            for (Future<List<Integer>> future : futures) for (int id : future.get(30, java.util.concurrent.TimeUnit.SECONDS)) assertTrue(ids.add(id));
+            assertEquals(160, ids.size()); assertTrue(ids.contains(95)); assertFalse(ids.contains(70));
+            try (Connection connection = openConnection()) { assertEquals(255, nextId(connection, "INCOME_AND_EXPENDITURE_DATA")); connection.rollback(); }
         } finally { executor.shutdownNow(); }
     }
 

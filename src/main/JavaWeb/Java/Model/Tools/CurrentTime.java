@@ -3,7 +3,7 @@ package Model.Tools;
 import java.util.Calendar;
 import java.time.Year;
 
-// 每个用户共享
+// Shared clock values for all users.
 public class CurrentTime {
 
     private static java.lang.String dayOfWeek = null, monthOfYear = null;

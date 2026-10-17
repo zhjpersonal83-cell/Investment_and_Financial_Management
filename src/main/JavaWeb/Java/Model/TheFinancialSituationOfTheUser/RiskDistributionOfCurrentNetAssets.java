@@ -5,22 +5,7 @@ import Model.Tools.Computing;
 import Model.UserAssets.InvestmentAsset;
 import Model.UserAssets.NonInvestmentAsset;
 
-/**
- * 职责:
- * 存储极低和低风险流动净资产总额
- * 存储中低和中风险流动净资产总额
- * 存储中高和高风险流动净资产总额
- * 存储极低和低风险流动净资产总额占比
- * 存储中低和中风险流动净资产总额占比
- * 存储中高和高风险流动净资产总额占比
- * 计算极低和低风险流动净资产总额
- * 计算中低和中风险流动净资产总额
- * 计算中高和高风险流动净资产总额
- * 计算极低和低风险流动净资产总额占比
- * 计算中低和中风险流动净资产总额占比
- * 计算中高和高风险流动净资产总额占比
- * (以某种货币)
- */
+/** Calculates balances and proportions for the three asset risk groups. */
 public class RiskDistributionOfCurrentNetAssets {
 
     private String totalVeryLowAndLowRiskCurrentNetAssets = "0.00", totalMediumLowAndMediumRiskCurrentNetAssets = "0.00",

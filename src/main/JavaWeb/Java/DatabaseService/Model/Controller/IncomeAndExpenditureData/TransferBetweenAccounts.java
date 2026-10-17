@@ -12,10 +12,10 @@ public class TransferBetweenAccounts extends DatabaseInit {
         String outgoing = CommonFunctionsNonDatabaseAbstraction.amount(amount);
         java.sql.Date recordDate = CommonFunctionsNonDatabaseAbstraction.date(date);
         try {
-            int outId = nextId("INCOME_AND_EXPENDITURE_DATA"), inId = nextId("INCOME_AND_EXPENDITURE_DATA");
             try (Connection connection = openConnection()) {
                 try {
                     lockUser(connection, userId);
+                    lockIdTables(connection, "INCOME_AND_EXPENDITURE_DATA");
                     CommonFunctionsNonDatabaseAbstraction.Account from = CommonFunctionsNonDatabaseAbstraction.find(connection, userId, fromPlatform);
                     CommonFunctionsNonDatabaseAbstraction.Account to = CommonFunctionsNonDatabaseAbstraction.find(connection, userId, toPlatform);
                     if (from.id == to.id && from.investment == to.investment) throw new IllegalArgumentException("Choose two different accounts.");
@@ -30,7 +30,9 @@ public class TransferBetweenAccounts extends DatabaseInit {
                     CommonFunctionsNonDatabaseAbstraction.change(to, "transfer_in", incoming, false);
                     CommonFunctionsNonDatabaseAbstraction.save(connection, from);
                     CommonFunctionsNonDatabaseAbstraction.save(connection, to);
+                    int outId = nextId(connection, "INCOME_AND_EXPENDITURE_DATA");
                     CommonFunctionsNonDatabaseAbstraction.insert(connection, outId, userId, "transfer_out", from.name, name, outgoing, recordDate, from.currency);
+                    int inId = nextId(connection, "INCOME_AND_EXPENDITURE_DATA");
                     CommonFunctionsNonDatabaseAbstraction.insert(connection, inId, userId, "transfer_in", to.name, name, incoming, recordDate, to.currency);
                     Ledger.transfer(connection, userId, outId, inId, from, to, outgoing, incoming, recordDate);
                     connection.commit(); return true;

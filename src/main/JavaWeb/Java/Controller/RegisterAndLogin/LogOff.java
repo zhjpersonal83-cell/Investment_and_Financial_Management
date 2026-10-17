@@ -12,7 +12,8 @@ public class LogOff extends HttpServlet {
     @Override
     protected void doPost(HttpServletRequest request, HttpServletResponse response) {
         ApiSupport.serve(request, response, true, (user, input) -> {
-            request.getSession(false).invalidate();
+            if (!ApiSupport.invalidateMatchingSession(request, user))
+                throw new ApiSupport.Failure(401, "Please sign in again.");
             return new JSONObject().put("status", "success");
         });
     }

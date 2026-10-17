@@ -1,10 +1,6 @@
 package Model.UserAssets;
 
-/**
- * 职责:
- * 提供资产的抽象
- * 每个资产都至少有币种和金额
- */
+/** Base asset contract: every asset has a currency and an amount. */
 public interface Asset {
 
     java.lang.String getCurrency();

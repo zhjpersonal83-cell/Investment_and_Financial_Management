@@ -11,7 +11,7 @@ public class EditInflationRate extends HttpServlet {
     @Override
     protected void doPost(HttpServletRequest request, HttpServletResponse response) {
         ApiSupport.serve(request, response, true, (user, input) -> {
-            ApiSupport.requireAdmin(user.getId());
+            ApiSupport.requireAdmin(user);
             String rate = input.has("rate") ? ApiSupport.text(input, "rate") : ApiSupport.text(input, "annualInflationRate");
             String currency = input.has("currency") ? ApiSupport.text(input, "currency") : ApiSupport.text(input, "variousCurrencies");
             Model.FixedTypes.Currencies.valueOf(currency);

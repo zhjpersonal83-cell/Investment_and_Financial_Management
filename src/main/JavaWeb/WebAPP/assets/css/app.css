@@ -68,10 +68,10 @@ button { color: inherit; }
 .skip-link { position: fixed; top: 10px; left: 10px; z-index: 999; transform: translateY(-150%); padding: 10px 14px; background: var(--panel-solid); border-radius: 10px; }
 .skip-link:focus { transform: translateY(0); }
 
-/* 性能修复 1：fixed -> absolute */
+/* Use absolute positioning to reduce repainting. */
 #ambient { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: -1; }
 
-/* 性能修复 2：取消动态 blur / 无限动画 */
+/* Avoid animated blur and perpetual animations. */
 .orb { position: absolute; border-radius: 999px; filter: none; opacity: .28; animation: none; }
 
 .orb-one { width: 290px; height: 290px; background: rgba(99,230,190,.22); left: -90px; top: 18%; }
@@ -93,19 +93,19 @@ button { color: inherit; }
 .auth-copy p { color: var(--muted); font-size: clamp(1rem, 1.45vw, 1.22rem); line-height: 1.75; max-width: 610px; }
 .trust-row { display: flex; flex-wrap: wrap; gap: 12px; }
 
-/* 性能修复 3：取消小面积玻璃模糊 */
+/* Avoid backdrop blur on compact panels. */
 .trust-pill { display: flex; align-items: center; gap: 8px; padding: 10px 13px; border: 1px solid var(--line); background: rgba(255,255,255,.025); border-radius: 999px; color: var(--muted); font-size: .82rem; backdrop-filter: none; }
 
 .market-strip { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 14px; max-width: 720px; }
 
-/* 性能修复 4：取消三张市场卡片的背景模糊 */
+/* Keep market cards free of backdrop blur. */
 .market-chip { padding: 17px; border: 1px solid var(--line); background: var(--panel); border-radius: 16px; box-shadow: var(--shadow-soft); backdrop-filter: none; }
 
 .market-chip small { color: var(--muted); display: block; margin-bottom: 8px; }
 .market-chip strong { font-size: 1.08rem; }
 .market-chip .live-dot { width: 7px; height: 7px; display: inline-block; border-radius: 50%; background: var(--good); margin-right: 7px; box-shadow: 0 0 0 5px rgba(98,217,168,.08); }
 
-/* 性能修复 5：取消占据约半屏的 blur(25px) */
+/* Avoid a large blurred layer covering half the screen. */
 .auth-panel { margin: 20px; border: 1px solid var(--line); background: var(--panel); backdrop-filter: none; border-radius: var(--radius-xl); box-shadow: var(--shadow); padding: clamp(28px, 4vw, 58px); display: flex; flex-direction: column; justify-content: center; position: relative; }
 
 .auth-tools { position: absolute; top: 22px; right: 22px; display: flex; gap: 8px; }

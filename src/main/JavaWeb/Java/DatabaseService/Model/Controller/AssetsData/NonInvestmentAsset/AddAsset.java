@@ -11,10 +11,10 @@ public class AddAsset extends DatabaseInit {
         String amount = databaseAmount(command.getAmount());
         CommonFunctions.validate(command.getAssetName(), command.getAssetType(), command.getRiskType(), command.getCurrency());
         try {
-            int id = nextId("ALL_NON_INVESTMENT_ASSETS");
             try (Connection connection = openConnection()) {
                 try {
                     lockUser(connection, userID);
+                    int id = nextId(connection, "ALL_NON_INVESTMENT_ASSETS");
                     CommonFunctions.available(connection, userID, command.getAssetName(), null, 0);
                     try (PreparedStatement statement = connection.prepareStatement("INSERT INTO ALL_NON_INVESTMENT_ASSETS "
                             + "(ID, USER_ID, NAME, AMOUNT, TYPE, RISK_TYPE, CURRENCY, DATE) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")) {

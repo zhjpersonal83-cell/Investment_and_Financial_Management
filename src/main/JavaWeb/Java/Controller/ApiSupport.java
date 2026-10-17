@@ -1,6 +1,7 @@
 package Controller;
 
 import Model.User;
+import DatabaseService.RequestIdentity;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -35,18 +36,34 @@ public final class ApiSupport {
     private static void serve(HttpServletRequest request, HttpServletResponse response,
                               boolean mutation, boolean publicRead, Action action) {
         prepare(response);
+        User requestUser = null;
         try {
             request.setCharacterEncoding("UTF-8");
             User user = publicRead && !request.getServletPath().startsWith("/api/")
                     ? null : authenticatedUser(request);
+            requestUser = user;
             if (mutation) {
                 if (request.getServletPath().startsWith("/api/"))
                     throw new Failure(405, "API keys are read-only.");
                 checkOrigin(request);
             }
-            JSONObject result = action.run(user, input(request));
-            if (!result.has("status")) result.put("status", "success");
-            write(response, result);
+            JSONObject input = input(request);
+            if (user != null) {
+                String browserGeneration = request.getHeader("X-IAFM-User-Generation");
+                if ((mutation || browserGeneration != null) && !user.getGeneration().equalsIgnoreCase(browserGeneration == null ? "" : browserGeneration))
+                    throw new Failure(401, "Please sign in again.");
+            }
+            try (RequestIdentity identity = user == null ? null : requestIdentity(user, mutation, request.getServletPath(), input)) {
+                if (publicRead && user != null) RequestIdentity.verifyCurrentUser();
+                JSONObject result = action.run(user, input);
+                if (!result.has("status")) result.put("status", "success");
+                if (user != null) result.put("userGeneration", user.getGeneration());
+                write(response, result);
+            }
+        } catch (RequestIdentity.StaleIdentity stale) {
+            response.setStatus(stale.isUser() ? 401 : 409);
+            if (stale.isUser() && requestUser != null) invalidateMatchingSession(request, requestUser);
+            write(response, new JSONObject().put("status", "failure").put("message", stale.getMessage()));
         } catch (Failure failure) {
             response.setStatus(failure.status);
             if (failure.status == 401) response.setHeader("WWW-Authenticate", "Bearer");
@@ -88,19 +105,34 @@ public final class ApiSupport {
         }
     }
 
+    /** Coordinate with login so an old response cannot invalidate a newer session identity. */
+    public static boolean invalidateMatchingSession(HttpServletRequest request, User expected) {
+        HttpSession session = request.getSession(false);
+        if (session == null) return false;
+        synchronized (session) {
+            try {
+                User current = (User) session.getAttribute("User");
+                if (current == null || !expected.getGeneration().equals(current.getGeneration())) return false;
+                session.invalidate();
+                return true;
+            } catch (IllegalStateException alreadyInvalidated) { return false; }
+        }
+    }
+
     public static User authenticatedUser(HttpServletRequest request) {
         if (request.getServletPath().startsWith("/api/")) {
-            int userId = apiUserId(request.getHeader("Authorization"), System.getenv("IAFM_API_KEYS"));
+            KeyOwner owner = apiOwner(request.getHeader("Authorization"), System.getenv("IAFM_API_KEYS"));
             User user = new User();
-            user.setId(userId);
+            user.setId(owner.id()); user.setGeneration(owner.generation());
             return user;
         }
         HttpSession session = request.getSession(false);
         User user = session == null ? null : (User) session.getAttribute("User");
-        if (user == null || user.getId() <= 0) throw new Failure(401, "Please sign in again.");
+        if (user == null || user.getId() <= 0 || !RequestIdentity.validGeneration(user.getGeneration())) throw new Failure(401, "Please sign in again.");
         // Read requests do not write report arrays into a shared session object.
         User snapshot = new User();
         snapshot.setId(user.getId());
+        snapshot.setGeneration(user.getGeneration());
         snapshot.setForename(user.getForename());
         snapshot.setSurname(user.getSurname());
         snapshot.setEmailAddress(user.getEmailAddress());
@@ -108,11 +140,20 @@ public final class ApiSupport {
         return snapshot;
     }
 
-    private record KeyConfiguration(String source, java.util.Map<String, Integer> owners) { }
+    private record KeyOwner(int id, String generation) { }
+    private record KeyConfiguration(String source, java.util.Map<String, KeyOwner> owners) { }
     private static volatile KeyConfiguration cachedKeys;
 
     /** Parse deployment configuration once; authentication is an O(1) lookup of a full SHA-256 digest. */
     static int apiUserId(String authorization, String configuration) {
+        return apiOwner(authorization, configuration).id();
+    }
+
+    static String apiUserGeneration(String authorization, String configuration) {
+        return apiOwner(authorization, configuration).generation();
+    }
+
+    private static KeyOwner apiOwner(String authorization, String configuration) {
         if (configuration == null || configuration.isBlank()) throw new Failure(503, "API access is not configured.");
         if (authorization == null || !authorization.startsWith("Bearer "))
             throw new Failure(401, "A valid Bearer API key is required.");
@@ -120,16 +161,17 @@ public final class ApiSupport {
         if (!token.matches("[A-Za-z0-9_-]{32,256}")) throw new Failure(401, "Invalid API key.");
         KeyConfiguration keys = cachedKeys;
         if (keys == null || !keys.source().equals(configuration)) {
-            java.util.Map<String, Integer> owners = new java.util.HashMap<>();
+            java.util.Map<String, KeyOwner> owners = new java.util.HashMap<>();
             for (String entry : configuration.split(";")) {
                 String[] parts = entry.trim().split(":", -1);
-                if (parts.length != 2 || !parts[0].matches("[1-9][0-9]{0,9}") || !parts[1].matches("[0-9a-fA-F]{64}"))
+                if (parts.length != 3 || !parts[0].matches("[1-9][0-9]{0,9}") || !RequestIdentity.validGeneration(parts[1]) || !parts[2].matches("[0-9a-fA-F]{64}"))
                     throw new Failure(503, "API key configuration is invalid.");
                 int userId;
                 try { userId = Integer.parseInt(parts[0]); }
                 catch (NumberFormatException invalid) { throw new Failure(503, "API key configuration is invalid."); }
-                Integer previous = owners.putIfAbsent(parts[1].toLowerCase(java.util.Locale.ROOT), userId);
-                if (previous != null && previous != userId)
+                KeyOwner owner = new KeyOwner(userId, parts[1].toLowerCase(java.util.Locale.ROOT));
+                KeyOwner previous = owners.putIfAbsent(parts[2].toLowerCase(java.util.Locale.ROOT), owner);
+                if (previous != null && !previous.equals(owner))
                     throw new Failure(503, "An API key must identify exactly one user.");
             }
             keys = new KeyConfiguration(configuration, java.util.Map.copyOf(owners));
@@ -139,7 +181,7 @@ public final class ApiSupport {
         try {
             digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(token.getBytes(StandardCharsets.UTF_8)));
         } catch (java.security.NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
-        Integer owner = keys.owners().get(digest);
+        KeyOwner owner = keys.owners().get(digest);
         if (owner == null) throw new Failure(401, "Invalid API key.");
         return owner;
     }
@@ -188,19 +230,41 @@ public final class ApiSupport {
         return Integer.parseInt(value);
     }
 
-    public static boolean isAdmin(int userId) {
-        String admins = System.getenv("IAFM_ADMIN_USER_IDS");
-        return configuredAdmin(userId, admins);
+    public static boolean isAdmin(User user) {
+        return configuredAdmin(user.getId(), user.getGeneration(), System.getenv("IAFM_ADMIN_USER_IDS"));
     }
 
-    static boolean configuredAdmin(int userId, String admins) {
-        if (userId <= 0 || admins == null) return false;
-        for (String id : admins.split(",")) if (id.trim().equals(Integer.toString(userId))) return true;
+    static boolean configuredAdmin(int userId, String generation, String admins) {
+        if (userId <= 0 || !RequestIdentity.validGeneration(generation) || admins == null) return false;
+        String identity = userId + ":" + generation;
+        for (String configured : admins.split(",")) if (configured.trim().equalsIgnoreCase(identity)) return true;
         return false;
     }
 
-    public static void requireAdmin(int userId) {
-        if (!isAdmin(userId)) throw new Failure(403, "Only an administrator can edit shared reference data.");
+    public static void requireAdmin(User user) {
+        if (!isAdmin(user)) throw new Failure(403, "Only an administrator can edit shared reference data.");
+    }
+
+    private static RequestIdentity requestIdentity(User user, boolean mutation, String path, JSONObject input) {
+        java.util.List<RequestIdentity.Record> records = new java.util.ArrayList<>();
+        java.util.List<RequestIdentity.Account> accounts = new java.util.ArrayList<>();
+        if (mutation) {
+            String table = switch (path) {
+                case "/editInvestmentAsset", "/deleteInvestmentAsset" -> "ALL_INVESTMENT_ASSETS";
+                case "/editNonInvestmentAsset", "/deleteNonInvestmentAsset" -> "ALL_NON_INVESTMENT_ASSETS";
+                case "/editIncomeOrExpense", "/deleteIncomeOrExpense" -> "INCOME_AND_EXPENDITURE_DATA";
+                case "/editInflationRate", "/deleteInflationRate" -> "ANNUAL_INFLATION_RATES_IN_VARIOUS_CURRENCIES";
+                default -> null;
+            };
+            if (table != null) records.add(new RequestIdentity.Record(table, positiveInt(input, "id", -1), input.optString("generation", "")));
+            if ("/addIncomeOrExpense".equals(path) || "/editIncomeOrExpense".equals(path))
+                accounts.add(new RequestIdentity.Account(text(input, "platform"), input.optString("platformGeneration", "")));
+            if ("/transferBetweenAccounts".equals(path)) {
+                accounts.add(new RequestIdentity.Account(text(input, "fromPlatform"), input.optString("fromPlatformGeneration", "")));
+                accounts.add(new RequestIdentity.Account(text(input, "toPlatform"), input.optString("toPlatformGeneration", "")));
+            }
+        }
+        return RequestIdentity.begin(user, mutation, records, accounts);
     }
 
     public static void checkOrigin(HttpServletRequest request) {

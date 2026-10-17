@@ -6,13 +6,7 @@ import Model.Tools.Computing;
 import Model.UserAssets.InvestmentAsset;
 import Model.UserAssets.NonInvestmentAsset;
 
-/**
- * 职责:
- * 存储不同货币持有的极低和低风险流动净资产
- * 存储不同货币持有的极低和低风险流动净资产占比
- * 计算不同货币持有的极低和低风险流动净资产
- * 计算不同货币持有的极低和低风险流动净资产占比
- */
+/** Calculates low-risk liquid net assets and their proportions by currency. */
 public class CurrencyDistributionOfVeryLowAndLowRiskInCurrentNetAssets {
 
     private String totalVeryLowAndLowRiskCurrentNetAssets_GBP = "0.00", totalVeryLowAndLowRiskCurrentNetAssets_CNY = "0.00";

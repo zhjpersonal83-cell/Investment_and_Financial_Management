@@ -2,7 +2,7 @@
 
 The Python source is publishable code. Bank statements and transaction payloads are private input files and must never be committed to a public repository.
 
-The importers in `5`, `6`, and `7` read `private_data.json` next to their source file. Each file contains the original decoded JSON transaction array; the SHA-256 integrity check remains in the importer. These private files are included only in the owner's local delivery package. They contain bank transaction details, so retain mode `0600` and store them securely. A public checkout deliberately omits them and displays a clear missing-data message instead of shipping example personal transactions.
+The importers in `5`, `6`, and `7` read `private_data.json` next to their source file. Each file contains the original decoded JSON transaction array; the SHA-256 integrity check remains in the importer. These private files are excluded from both the source repository and the delivery ZIP; provide them separately on the importing machine. They contain bank transaction details, so retain mode `0600` and store them securely. A public checkout deliberately omits them and displays a clear missing-data message instead of shipping example personal transactions.
 
 PDF, XLS, CSV, checkpoints, database snapshots and reconciliation plans are also excluded. `.gitignore` does not erase earlier Git history: publication must also check all reachable commits, branches and tags for previously embedded payloads or credentials.
 

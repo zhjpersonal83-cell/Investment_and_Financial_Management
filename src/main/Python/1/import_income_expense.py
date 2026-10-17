@@ -1,18 +1,10 @@
 #!/usr/bin/env python3
-"""
-将邮政储蓄银行 .xls 流水逐条导入 addIncomeOrExpense 接口。
+"""Import verified bank transactions through the authenticated income/expense API.
 
-字段映射：
-- type: 交易金额 >= 0 -> income；交易金额 < 0 -> expense
-- platform: 邮政储蓄银行活期账户
-- name: 摘要
-- amount: 交易金额绝对值
-- date: 交易时间的日期部分（yyyy-MM-dd）
-
-注意：后端接口不接收 userID，而是使用登录 Session 中的 User。
-因此必须使用数据库中 ID=2 用户的账号密码，或该用户当前有效的 JSESSIONID。
-
-本脚本仅使用 Python 标准库，不需要安装 xlrd、pandas 或 requests。
+Amounts use exact minor units; dates use YYYY-MM-DD. The selected owner and account
+are pinned to immutable generations for the lifetime of the import. Private source
+files and checkpoints must remain outside published packages. Session ownership is
+verified before the first write; no caller-supplied user ID is sent to the API.
 """
 
 from __future__ import annotations
@@ -39,23 +31,23 @@ from urllib.request import (
     build_opener,
 )
 
-# ----------------------------- 默认配置 -----------------------------
+# ----------------------------- Default configuration -----------------------------
 DEFAULT_XLS = "2024-09-18---2026-07-31.xls"
 DEFAULT_BASE_URL = "http://localhost:8080/Investment_and_Financial_Management"
-# Java 注解是 @WebServlet("/addIncomeOrExpense")，路径区分大小写。
+# Servlet endpoint names are case-sensitive.
 DEFAULT_ENDPOINT = "/addIncomeOrExpense"
 DEFAULT_LOGIN_ENDPOINT = "/login"
 DEFAULT_PLATFORM = "邮政储蓄银行活期账户"
 EXPECTED_USER_ID = 2
 DEFAULT_CHECKPOINT = ".income_expense_import_checkpoint.json"
 
-# Compound File Binary / BIFF 常量
+# Compound File Binary / BIFF constants
 FREESECT = 0xFFFFFFFF
 ENDOFCHAIN = 0xFFFFFFFE
 
 
 class ImportErrorWithMessage(RuntimeError):
-    """可直接展示给用户的导入错误。"""
+    """An import error safe to show to the operator."""
 
 
 def money_minor(value: Any) -> int:
@@ -78,14 +70,14 @@ def money_text(minor: int) -> str:
 
 
 class NoRedirectHandler(HTTPRedirectHandler):
-    """不自动跟随重定向，以便识别 Session 失效。"""
+    """Do not follow redirects that can conceal an expired session."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
         return None
 
 
 class CompoundFile:
-    """读取旧版 .xls 使用的 OLE Compound File。"""
+    """Read the OLE Compound File container used by legacy XLS files."""
 
     def __init__(self, path: Path) -> None:
         self.data = path.read_bytes()
@@ -248,7 +240,7 @@ def decode_rk(value: int) -> float:
 
 
 class SegmentedReader:
-    """读取 SST 与其 CONTINUE 记录。"""
+    """Read an SST record and its CONTINUE segments."""
 
     def __init__(self, segments: list[bytes]) -> None:
         self.segments = segments
@@ -290,7 +282,7 @@ class SegmentedReader:
                 self.position = 0
                 if self.segment_index >= len(self.segments):
                     raise EOFError("SST CONTINUE 数据缺失")
-                # 字符串跨 CONTINUE 时，第一个字节重新声明字符编码。
+                # A string continued into another record restates its encoding in the first byte.
                 current_wide = bool(self.segments[self.segment_index][0] & 1)
                 self.position = 1
                 available = len(self.segments[self.segment_index]) - self.position
@@ -380,7 +372,7 @@ def read_xls_rows(path: Path) -> list[list[Any]]:
     if not sheet_positions:
         raise ImportErrorWithMessage(".xls 中没有工作表")
 
-    # 此文件的交易数据在第一个工作表。
+    # Transaction data are stored in the first worksheet.
     start = sheet_positions[0][0]
     end = sheet_positions[1][0] if len(sheet_positions) > 1 else len(workbook)
     cells: dict[tuple[int, int], Any] = {}
@@ -446,7 +438,7 @@ def decimal_text(value: Any) -> str:
 
 def parse_trade_date(value: Any) -> str:
     text = str(value).strip()
-    # 银行文件中的格式为 yyyy-MM-dd HH:mm；Java 后端只保存 java.sql.Date。
+    # The bank includes a time; the Java backend stores only the calendar date.
     candidate = text[:10]
     parts = candidate.split("-")
     if len(parts) != 3 or not all(part.isdigit() for part in parts):
@@ -488,7 +480,7 @@ def extract_transactions(rows: list[list[Any]], platform: str) -> list[Transacti
         raw_amount = get_value("交易金额")
         summary = get_value("摘要")
 
-        # 跳过空行、下载时间等非交易行。
+        # Ignore blank rows and download metadata.
         if trade_time in (None, "") or raw_amount in (None, ""):
             continue
 
@@ -500,7 +492,7 @@ def extract_transactions(rows: list[list[Any]], platform: str) -> list[Transacti
         transaction_type = "income" if signed_amount >= 0 else "expense"
         transactions.append(
             Transaction(
-                source_row=row_index + 1,  # Excel 行号从 1 开始
+                source_row=row_index + 1,  # Excel row numbers are one-based.
                 type=transaction_type,
                 platform=platform,
                 name="" if summary is None else str(summary).strip(),
@@ -523,6 +515,8 @@ class FinanceHttpClient:
             HTTPCookieProcessor(self.cookie_jar), NoRedirectHandler()
         )
         self.jsessionid = jsessionid.strip() if jsessionid else None
+        self.user_generation = None
+        self._account_generations = {}
 
     def _request(
         self,
@@ -536,6 +530,8 @@ class FinanceHttpClient:
         headers = {"Accept": "application/json", "Origin": origin.scheme + "://" + origin.netloc}
         if self.jsessionid:
             headers["Cookie"] = f"JSESSIONID={self.jsessionid}"
+        if getattr(self, "user_generation", None):
+            headers["X-IAFM-User-Generation"] = self.user_generation
 
         if form is not None:
             body = urlencode(form).encode("utf-8")
@@ -576,10 +572,47 @@ class FinanceHttpClient:
             raise ImportErrorWithMessage("登录接口没有返回有效 JSON") from exc
         if result.get("status") not in ("success", "already_logged_in"):
             raise ImportErrorWithMessage(result.get("message", "登录失败"))
+        self.user_generation = None
+        self._account_generations = {}
+
+    def _identity_form(self, transaction: Transaction) -> dict[str, str]:
+        """Pin the selected owner and account once; never silently follow a recycled ID."""
+        if not getattr(self, "user_generation", None):
+            status, body, _headers = self._request("/getUserProfile")
+            profile = self._successful_json(status, body, "Identity")
+            generation = profile.get("userGeneration")
+            if profile.get("id") != EXPECTED_USER_ID or not isinstance(generation, str) or len(generation) != 36:
+                raise ImportErrorWithMessage("The authenticated owner does not match this import.")
+            self.user_generation = generation
+        form = transaction.form_data()
+        platform = form.get("platform")
+        if not isinstance(platform, str) or not platform:
+            raise ImportErrorWithMessage("The import account is missing.")
+        if not hasattr(self, "_account_generations"):
+            self._account_generations = {}
+        if platform not in self._account_generations:
+            page, matches = 1, []
+            while True:
+                status, body, _headers = self._request("/getPlatforms", json_data={"page": page, "pageSize": 100, "q": platform})
+                result = self._successful_json(status, body, "Account identity")
+                items = result.get("items")
+                if not isinstance(items, list) or len(items) > 100 or type(result.get("hasNext")) is not bool:
+                    raise ImportErrorWithMessage("Invalid account pagination.")
+                matches.extend(item for item in items if isinstance(item, dict) and item.get("name") == platform)
+                if not result["hasNext"]:
+                    break
+                if not items:
+                    raise ImportErrorWithMessage("Incomplete account pagination.")
+                page += 1
+            if len(matches) != 1 or not isinstance(matches[0].get("generation"), str) or len(matches[0]["generation"]) != 36:
+                raise ImportErrorWithMessage("The import account is missing, ambiguous, or has no generation.")
+            self._account_generations[platform] = matches[0]["generation"]
+        form["platformGeneration"] = self._account_generations[platform]
+        return form
 
     def add_transaction(self, endpoint: str, transaction: Transaction) -> None:
         status, body, _headers = self._request(
-            endpoint, form=transaction.form_data()
+            endpoint, form=self._identity_form(transaction)
         )
         self._successful_json(status, body, "新增")
 
@@ -699,8 +732,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--retries",
         type=int,
+        choices=(1,),
         default=1,
-        help="单条记录最多尝试次数；为避免超时后重复写入，默认不自动重试",
+        help="仅允许 1；金融写入不自动重试，失败后须先核对服务器记录",
     )
     parser.add_argument("--limit", type=int, help="仅处理前 N 条待导入记录")
     parser.add_argument(
@@ -726,8 +760,8 @@ def main() -> int:
         raise ImportErrorWithMessage(f"找不到 Excel 文件：{xls_path}")
     if args.delay < 0:
         raise ImportErrorWithMessage("--delay 不能小于 0")
-    if args.retries < 1:
-        raise ImportErrorWithMessage("--retries 至少为 1")
+    if args.retries != 1:
+        raise ImportErrorWithMessage("--retries must be 1: financial writes are never retried automatically.")
 
     print(f"读取文件：{xls_path}")
     rows = read_xls_rows(xls_path)
@@ -798,24 +832,13 @@ def main() -> int:
 
     succeeded_this_run = 0
     for index, tx in enumerate(pending, start=1):
-        last_error: Exception | None = None
-        for attempt in range(1, args.retries + 1):
-            try:
-                client.add_transaction(args.endpoint, tx)
-                last_error = None
-                break
-            except ImportErrorWithMessage as exc:
-                last_error = exc
-                # Session 重定向通常不是临时错误，直接停止以避免重复。
-                if "Session" in str(exc) or "重定向" in str(exc):
-                    raise
-                if attempt < args.retries:
-                    time.sleep(min(2 ** (attempt - 1), 8))
-
-        if last_error is not None:
+        try:
+            client.add_transaction(args.endpoint, tx)
+        except Exception as exc:
             raise ImportErrorWithMessage(
-                f"Excel 第 {tx.source_row} 行导入失败：{last_error}"
-            ) from last_error
+                f"Excel row {tx.source_row}: import stopped without retry. The server may have committed this record; "
+                "reconcile it against the source and checkpoint before restarting. " + str(exc)
+            ) from exc
 
         completed_rows.add(tx.source_row)
         save_checkpoint(checkpoint_path, source_hash, completed_rows)
@@ -841,8 +864,7 @@ def main() -> int:
             )
 
     print(
-        "完成。注意：当前 AddIncomeOrExpense Servlet 即使数据库写入失败也可能返回 HTTP 200；"
-        "建议运行时加 --verify-count，并检查服务器日志。"
+        "完成：每条写入均已收到明确成功响应。建议使用 --verify-count 核对服务器记录。"
     )
     return 0
 

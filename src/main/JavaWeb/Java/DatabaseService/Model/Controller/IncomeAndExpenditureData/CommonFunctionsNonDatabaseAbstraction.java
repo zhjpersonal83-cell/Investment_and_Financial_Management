@@ -6,8 +6,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.Set;
 
 /** Changes a stored balance under the caller's transaction; no SQL floating point arithmetic. */
@@ -94,28 +92,6 @@ class CommonFunctionsNonDatabaseAbstraction extends DatabaseInit {
             statement.setString(5, name); statement.setString(6, amount(amount)); statement.setDate(7, date); statement.setString(8, currency);
             if (statement.executeUpdate() != 1) throw new SQLException("Transaction was not inserted.");
         }
-    }
-
-    static boolean updateAmount(Connection connection, int userId, String type, String platform, String amount,
-                                String updateType, String oldType, String oldPlatform, String oldAmount, Boolean ignored) {
-        try {
-            Map<String, Account> accounts = new LinkedHashMap<>();
-            if ("edit".equals(updateType)) {
-                Account old = find(connection, userId, oldPlatform); accounts.put(oldPlatform, old);
-                change(old, oldType, oldAmount, true);
-            }
-            Account account = accounts.get(platform);
-            if (account == null) { account = find(connection, userId, platform); accounts.put(platform, account); }
-            if ("edit".equals(updateType)) {
-                Account old = accounts.get(oldPlatform);
-                if (old.id == account.id && old.investment == account.investment) {
-                    accounts.remove(platform); accounts.put(oldPlatform, old); account = old;
-                }
-            }
-            change(account, type, amount, "delete".equals(updateType));
-            for (Account changed : accounts.values()) save(connection, changed);
-            return true;
-        } catch (SQLException | IllegalArgumentException | ArithmeticException exception) { return false; }
     }
 
     static class Account {

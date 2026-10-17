@@ -11,10 +11,10 @@ public class AddIncomeOrExpense extends DatabaseInit {
         if (!java.util.Set.of("income", "expense").contains(type)) throw new IllegalArgumentException("Use the paired transfer action for internal transfers.");
         java.sql.Date recordDate = CommonFunctionsNonDatabaseAbstraction.date(date);
         try {
-            int id = nextId("INCOME_AND_EXPENDITURE_DATA");
             try (Connection connection = openConnection()) {
                 try {
                     lockUser(connection, userID);
+                    int id = nextId(connection, "INCOME_AND_EXPENDITURE_DATA");
                     CommonFunctionsNonDatabaseAbstraction.Account account = CommonFunctionsNonDatabaseAbstraction.find(connection, userID, platform);
                     CommonFunctionsNonDatabaseAbstraction.insert(connection, id, userID, type, account.name, name, normalized, recordDate, account.currency);
                     Ledger.external(connection, userID, id, type, account.name, normalized, recordDate, account.currency);

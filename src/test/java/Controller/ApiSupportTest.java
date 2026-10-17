@@ -23,11 +23,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import static org.junit.Assert.*;
 
 public class ApiSupportTest {
+    private static final String GENERATION = "12345678-1234-1234-1234-123456789abc";
     private static final String TOKEN_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private static final String TOKEN_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     private static String config(int userId, String token) throws Exception {
-        return userId + ":" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+        return userId + ":" + GENERATION + ":" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
                 .digest(token.getBytes(StandardCharsets.UTF_8)));
     }
 
@@ -95,7 +96,7 @@ public class ApiSupportTest {
     }
 
     @Test public void readRequestsUseTheSessionOwnerAndAnIsolatedSnapshot() {
-        User owner = new User(); owner.setId(7); owner.setCurrencyCurrentChosen("GBP");
+        User owner = new User(); owner.setId(7); owner.setGeneration(GENERATION); owner.setCurrencyCurrentChosen("GBP");
         Fixture f = new Fixture(owner);
         f.body = "{\"userId\":9,\"currency\":\"CNY\"}";
         ApiSupport.serve(f.request(), f.response(), false, (user, input) -> {
@@ -138,11 +139,11 @@ public class ApiSupportTest {
     }
 
     @Test public void adminRequiresAnExplicitPositiveConfiguredIdentity() {
-        assertTrue(ApiSupport.configuredAdmin(2, "2,7"));
-        assertFalse(ApiSupport.configuredAdmin(3, "2,7"));
-        assertFalse(ApiSupport.configuredAdmin(0, "0,2"));
-        assertFalse(ApiSupport.configuredAdmin(2, null));
-        assertFalse(ApiSupport.configuredAdmin(2, "12"));
+        assertTrue(ApiSupport.configuredAdmin(2, GENERATION, "2:" + GENERATION + ",7:" + GENERATION));
+        assertFalse(ApiSupport.configuredAdmin(3, GENERATION, "2:" + GENERATION + ",7:" + GENERATION));
+        assertFalse(ApiSupport.configuredAdmin(0, GENERATION, "0:" + GENERATION + ",2:" + GENERATION));
+        assertFalse(ApiSupport.configuredAdmin(2, GENERATION, null));
+        assertFalse(ApiSupport.configuredAdmin(2, GENERATION, "2,12"));
     }
 
     @Test public void loopbackHttpsProxyAcceptsMatchingPublicOrigin() {
@@ -192,8 +193,50 @@ public class ApiSupportTest {
         }
     }
 
+    @Test public void recycledIdsCannotRetainApiKeysOrAdministratorPrivileges() throws Exception {
+        assertEquals(GENERATION, ApiSupport.apiUserGeneration("Bearer " + TOKEN_A, config(7, TOKEN_A)));
+        assertFalse(ApiSupport.configuredAdmin(7, "87654321-1234-1234-1234-123456789abc", "7:" + GENERATION));
+        assertFailure(503, () -> ApiSupport.apiUserId("Bearer " + TOKEN_A, "7:" + "a".repeat(64)));
+    }
+
+    @Test public void mutationsRequireTheBrowserSessionGenerationAndRecordGeneration() {
+        Fixture stale = authenticated(); stale.requestHeaders.remove("X-IAFM-User-Generation");
+        AtomicBoolean invoked = new AtomicBoolean();
+        ApiSupport.serve(stale.request(), stale.response(), true, (user, input) -> { invoked.set(true); return new JSONObject(); });
+        assertEquals(401, stale.status); assertFalse(invoked.get());
+        Fixture missing = authenticated(); missing.servletPath = "/deleteInvestmentAsset"; missing.body = "{\"id\":7}";
+        ApiSupport.serve(missing.request(), missing.response(), true, (user, input) -> { invoked.set(true); return new JSONObject(); });
+        assertEquals(409, missing.status); assertFalse(invoked.get());
+        Fixture valid = authenticated(); valid.servletPath = "/deleteInvestmentAsset";
+        valid.body = new JSONObject().put("id", 7).put("generation", GENERATION).toString();
+        ApiSupport.serve(valid.request(), valid.response(), true, (user, input) -> { invoked.set(true); return new JSONObject(); });
+        assertEquals(200, valid.status); assertTrue(invoked.get());
+        assertFalse(DatabaseService.RequestIdentity.isReadRequest());
+    }
+
+    @Test public void selfDeletionRejectsMissingSessionGenerationBeforeDatabaseAccess() throws Exception {
+        Fixture f = authenticated(); f.servletPath = "/deleteUser"; f.method = "POST";
+        f.requestHeaders.remove("X-IAFM-User-Generation");
+        new Controller.RegisterAndLogin.DeleteUser().service(f.request(), f.response());
+        assertEquals(401, f.status);
+        assertEquals("failure", f.json().getString("status"));
+    }
+
+    @Test public void oldLogoutCannotInvalidateAReplacementSessionIdentity() throws Exception {
+        Fixture f = authenticated(); f.servletPath = "/logOff"; f.method = "POST";
+        User replacement = new User(); replacement.setId(7);
+        replacement.setGeneration("87654321-1234-1234-1234-123456789abc");
+        f.afterInitialUserRead = () -> f.sessionUser = replacement;
+        new Controller.RegisterAndLogin.LogOff().service(f.request(), f.response());
+        assertEquals(401, f.status); assertFalse(f.invalidated);
+        assertSame(replacement, f.sessionUser);
+        Fixture current = authenticated(); current.servletPath = "/logOff"; current.method = "POST";
+        new Controller.RegisterAndLogin.LogOff().service(current.request(), current.response());
+        assertEquals(200, current.status); assertTrue(current.invalidated);
+    }
+
     private static Fixture authenticated() {
-        User user = new User(); user.setId(7); return new Fixture(user);
+        User user = new User(); user.setId(7); user.setGeneration(GENERATION); return new Fixture(user);
     }
     @FunctionalInterface private interface CheckedAction { void run() throws Exception; }
     private static void withRate(double rate, CheckedAction assertions) throws Exception {
@@ -221,15 +264,25 @@ public class ApiSupportTest {
     }
     private static class Fixture {
         final User user;
+        User sessionUser;
+        Runnable afterInitialUserRead;
+        boolean invalidated;
         final Map<String,String> requestHeaders = new HashMap<>(), responseHeaders = new HashMap<>();
         final StringWriter output = new StringWriter();
         String body = "{}", servletPath = "/getAssetSummary", method = "GET"; int status = 200;
         String requestBase = "https://finance.example", remoteAddr = "203.0.113.2";
-        Fixture(User user) { this.user = user; requestHeaders.put("Origin", "https://finance.example"); }
+        Fixture(User user) { this.user = user; this.sessionUser = user; requestHeaders.put("Origin", "https://finance.example"); if (user != null) requestHeaders.put("X-IAFM-User-Generation", user.getGeneration()); }
         JSONObject json() { return new JSONObject(output.toString()); }
         HttpServletRequest request() {
-            HttpSession session = user == null ? null : proxy(HttpSession.class, (p, m, a) ->
-                    m.getName().equals("getAttribute") ? user : defaultValue(m.getReturnType()));
+            HttpSession session = user == null ? null : proxy(HttpSession.class, (p, m, a) -> {
+                if (m.getName().equals("getAttribute")) {
+                    User current = sessionUser;
+                    if (afterInitialUserRead != null) { Runnable publish = afterInitialUserRead; afterInitialUserRead = null; publish.run(); }
+                    return current;
+                }
+                if (m.getName().equals("invalidate")) invalidated = true;
+                return defaultValue(m.getReturnType());
+            });
             ServletContext context = proxy(ServletContext.class, (p,m,a) -> defaultValue(m.getReturnType()));
             return proxy(HttpServletRequest.class, (p,m,a) -> switch(m.getName()) {
                 case "getSession" -> session;

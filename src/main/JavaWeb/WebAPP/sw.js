@@ -1,4 +1,4 @@
-const CACHE = 'finance-workspace-shell-v8';
+const CACHE = 'finance-workspace-shell-v9';
 const SHELL = ['./','./index.html','./assets/css/app.css','./assets/js/app.js','./assets/icons/favicon.svg','./manifest.webmanifest','./privacy-policy.html','./exchange-rates.html','./assets/js/exchange-rates.js'];
 const SHELL_URLS = new Set(SHELL.map(path => new URL(path, self.registration.scope).href));
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting())));

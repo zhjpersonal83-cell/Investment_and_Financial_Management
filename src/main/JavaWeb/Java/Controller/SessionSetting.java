@@ -14,10 +14,4 @@ public class SessionSetting implements HttpSessionListener {
         httpSession.setMaxInactiveInterval(10 * 60);
     }
 
-    @Override
-    public void sessionDestroyed(HttpSessionEvent httpSessionEvent) {
-        HttpSession httpSession = httpSessionEvent.getSession();
-        Model.Tools.Locks.removeConcurrentHashMapLock(httpSession.getId());
-    }
-
 }

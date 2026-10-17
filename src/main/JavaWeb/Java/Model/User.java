@@ -6,6 +6,9 @@ import Model.UserAssets.*;
 public class User {
 
     private int id = 0;
+    private String generation;
+    public String getGeneration() { return generation; }
+    public void setGeneration(String generation) { this.generation = generation; }
     private java.lang.String forename = null, surname = null, emailAddress = null;
     private volatile java.lang.String currencyCurrentChosen = "GBP";
     public int getId() {

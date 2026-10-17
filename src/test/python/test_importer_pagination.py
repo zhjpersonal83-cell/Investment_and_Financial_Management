@@ -23,6 +23,7 @@ def isolated_client(script):
         "ImportErrorWithMessage": ValueError,
         "HttpRequestError": type("FakeHttpRequestError", (RuntimeError,), {}),
         "DEFAULT_ENDPOINT": "/addIncomeOrExpense", "FALLBACK_ENDPOINT": "/AddIncomeOrExpense",
+        "EXPECTED_USER_ID": 2,
     }
     exec(compile(ast.Module(body=[client_node], type_ignores=[]), str(script), "exec"), namespace)
     # The real constructor prepares network/cookie handlers. It is intentionally never called.
@@ -89,10 +90,12 @@ class ImporterPaginationTests(unittest.TestCase):
                         client.count_transactions()
 
     def test_add_requires_an_explicit_json_success_before_returning(self):
-        transaction = SimpleNamespace(form_data=lambda: {"amount": "1.00"})
+        transaction = SimpleNamespace(form_data=lambda: {"amount": "1.00", "platform": "Cash"})
         for script in SCRIPTS:
             with self.subTest(script=script.name):
                 client = isolated_client(script)
+                client.user_generation = "00000000-0000-0000-0000-000000000001"
+                client._account_generations = {"Cash": "00000000-0000-0000-0000-000000000002"}
                 for status, body in (
                     (200, b'{"status":"failure","message":"Fake write failure"}'),
                     (200, b'{}'), (200, b'<html>Sign in</html>'), (204, b''),
@@ -102,6 +105,38 @@ class ImporterPaginationTests(unittest.TestCase):
                         client.add_transaction("/addIncomeOrExpense", transaction)
                 client._request = lambda *args, **kwargs: (200, b'{"status":"success"}', {})
                 client.add_transaction("/addIncomeOrExpense", transaction)
+
+    def test_owner_and_account_generation_are_pinned_for_the_import(self):
+        for script in SCRIPTS:
+            with self.subTest(script=script.name):
+                client = isolated_client(script)
+                calls = []
+                generation = "00000000-0000-0000-0000-000000000002"
+                def request(path, **kwargs):
+                    calls.append(path)
+                    if path == "/getUserProfile":
+                        body = {"id": 2, "userGeneration": generation}
+                    elif path == "/getPlatforms":
+                        body = {"items": [{"name": "Cash", "generation": generation}], "hasNext": False}
+                    else:
+                        raise AssertionError(path)
+                    return 200, json.dumps({"status": "success", **body}).encode(), {}
+                client._request = request
+                transaction = SimpleNamespace(form_data=lambda: {"amount": "1.00", "platform": "Cash"})
+                self.assertEqual(client._identity_form(transaction)["platformGeneration"], generation)
+                # A later replacement must not be silently accepted by re-reading its identity.
+                client._request = lambda *a, **kw: self.fail("Identity must remain pinned")
+                self.assertEqual(client._identity_form(transaction)["platformGeneration"], generation)
+                self.assertEqual(calls, ["/getUserProfile", "/getPlatforms"])
+
+    def test_wrong_owner_stops_before_any_write(self):
+        for script in SCRIPTS:
+            with self.subTest(script=script.name):
+                client = isolated_client(script)
+                client._request = lambda *a, **kw: (200, json.dumps({"status": "success", "id": 4,
+                    "userGeneration": "00000000-0000-0000-0000-000000000001"}).encode(), {})
+                with self.assertRaises(ValueError):
+                    client._identity_form(SimpleNamespace(form_data=lambda: {"platform": "Cash"}))
 
 
 if __name__ == "__main__":

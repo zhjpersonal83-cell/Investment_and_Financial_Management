@@ -17,21 +17,17 @@ public class Register extends DatabaseInit {
         String email = emailAddress.trim().toLowerCase(Locale.ROOT);
         String encodedPassword = Model.Tools.Passwords.encode(password);
         try {
-            int userId = nextId("USERS"), basicId = nextId("BASIC_VARIABLES_AND_DATA");
             try (Connection connection = openConnection()) {
                 try {
-                    // The unchanged schema has no email uniqueness constraint. The existing
-                    // registration sequence row guards this short check-and-create transaction.
-                    try (PreparedStatement statement = connection.prepareStatement("SELECT TABLE_ID FROM ID_RECORDER_USERS WHERE TABLE_ID <= 0 ORDER BY TABLE_ID LIMIT 1 FOR UPDATE");
-                         ResultSet result = statement.executeQuery()) {
-                        if (!result.next()) throw new SQLException("Registration sequence is unavailable.");
-                    }
-                    try (PreparedStatement statement = connection.prepareStatement("SELECT ID FROM USERS WHERE LOWER(EMAIL_ADDRESS) = ? FOR UPDATE")) {
+                    // All registrations hold these locks in canonical order through both inserts.
+                    lockIdTables(connection, "USERS", "BASIC_VARIABLES_AND_DATA");
+                    try (PreparedStatement statement = connection.prepareStatement("SELECT ID FROM USERS WHERE LOWER(EMAIL_ADDRESS) = ?")) {
                         statement.setString(1, email);
                         try (ResultSet result = statement.executeQuery()) {
                             if (result.next()) { rollback(connection); return false; }
                         }
                     }
+                    int userId = nextId(connection, "USERS"), basicId = nextId(connection, "BASIC_VARIABLES_AND_DATA");
                     try (PreparedStatement statement = connection.prepareStatement("INSERT INTO USERS (ID, FORENAME, SURNAME, EMAIL_ADDRESS, PASSWORD) VALUES (?, ?, ?, ?, ?)")) {
                         statement.setInt(1, userId); statement.setString(2, forename); statement.setString(3, surname);
                         statement.setString(4, email); statement.setString(5, encodedPassword);

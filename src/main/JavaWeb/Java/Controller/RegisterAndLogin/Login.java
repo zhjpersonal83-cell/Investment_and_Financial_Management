@@ -35,10 +35,12 @@ public class Login extends HttpServlet {
                 return;
             }
             HttpSession session = request.getSession(true);
-            request.changeSessionId();
-            session.setAttribute("User", user);
+            synchronized (session) {
+                request.changeSessionId();
+                session.setAttribute("User", user);
+            }
             ApiSupport.write(response, new JSONObject().put("status", "success")
-                    .put("userName", user.getForename() + " " + user.getSurname()).put("userAccount", user.getEmailAddress()));
+                    .put("userGeneration", user.getGeneration()).put("userName", user.getForename() + " " + user.getSurname()).put("userAccount", user.getEmailAddress()));
         } catch (ApiSupport.Failure failure) {
             response.setStatus(failure.httpStatus());
             ApiSupport.write(response, new JSONObject().put("status", "failure").put("message", "Request denied."));

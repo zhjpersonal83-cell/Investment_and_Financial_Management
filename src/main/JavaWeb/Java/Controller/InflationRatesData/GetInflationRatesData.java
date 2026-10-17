@@ -10,7 +10,7 @@ import javax.servlet.http.HttpServletResponse;
 public class GetInflationRatesData extends HttpServlet {
     @Override
     protected void doGet(HttpServletRequest request, HttpServletResponse response) {
-        ApiSupport.serve(request, response, false, (user, input) -> Model.Controller.ReadData.inflationPage(user, input).put("canEdit", ApiSupport.isAdmin(user.getId())));
+        ApiSupport.serve(request, response, false, (user, input) -> Model.Controller.ReadData.inflationPage(user, input).put("canEdit", ApiSupport.isAdmin(user)));
     }
     @Override
     protected void doPost(HttpServletRequest request, HttpServletResponse response) {

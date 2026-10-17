@@ -23,9 +23,9 @@ public class ReadData extends DatabaseInit {
     public static final int MAX_PAGE_SIZE = 100;
     private static final Set<String> MONEY_FIELDS = Set.of("amount", "investmentAmount", "cashWithdrawal",
             "managementFee", "handlingFee", "buyInAmount", "amountSold", "realTimeAmount", "initialEarnings");
-    private static final String NON_INVESTMENT_FIELDS = "ID AS id, NAME AS assetName, AMOUNT AS amount, "
+    private static final String NON_INVESTMENT_FIELDS = "ID AS id, GENERATION AS generation, NAME AS assetName, AMOUNT AS amount, "
             + "TYPE AS assetType, RISK_TYPE AS riskType, CURRENCY AS currency, DATE AS date";
-    private static final String INVESTMENT_FIELDS = "ID AS id, INVESTMENT_PLATFORM AS investmentPlatform, "
+    private static final String INVESTMENT_FIELDS = "ID AS id, GENERATION AS generation, INVESTMENT_PLATFORM AS investmentPlatform, "
             + "INVESTMENT_AMOUNT AS investmentAmount, CASH_WITHDRAWAL AS cashWithdrawal, "
             + "MANAGEMENT_FEE AS managementFee, HANDLING_FEE AS handlingFee, BUY_IN_AMOUNT AS buyInAmount, "
             + "AMOUNT_SOLD AS amountSold, REAL_TIME_AMOUNT AS realTimeAmount, INITIAL_EARNINGS AS initialEarnings, "
@@ -70,13 +70,15 @@ public class ReadData extends DatabaseInit {
         if (filters == null) filters = new JSONObject();
         Query query = transactionFilter(userId, filters);
         try (Connection connection = readConnection()) {
-            JSONObject result = page(connection, "ID AS id, TYPE AS type, PLATFORM AS platform, NAME AS name, "
+            JSONObject result = page(connection, "ID AS id, GENERATION AS generation, TYPE AS type, PLATFORM AS platform, NAME AS name, "
                             + "AMOUNT AS amount, DATE AS date, CURRENCY AS currency, JOURNAL_ID AS journalId", query.sql, query.parameters,
                     transactionOrder(filters), filters.optInt("page", 1), filters.optInt("pageSize", DEFAULT_PAGE_SIZE));
             JSONArray items = result.getJSONArray("items");
             Map<String, JSONObject> counterparts = transferCounterparts(connection, userId, items);
+            Map<String, String> generations = accountGenerations(connection, userId, items);
             for (int i = 0; i < items.length(); i++) {
                 JSONObject item = items.getJSONObject(i);
+                item.put("platformGeneration", generations.getOrDefault(item.getString("platform"), ""));
                 item.put("isTransfer", item.getString("type").startsWith("transfer_"));
                 item.put("internalTransfer", item.getBoolean("isTransfer"));
                 String journal = item.optString("journalId", "");
@@ -92,6 +94,31 @@ public class ReadData extends DatabaseInit {
             connection.commit();
             return result;
         }
+    }
+
+    private static Map<String, String> accountGenerations(Connection connection, int userId, JSONArray items) throws SQLException {
+        Map<String, String> generations = new LinkedHashMap<>();
+        if (items.isEmpty()) return generations;
+        String placeholders = String.join(",", java.util.Collections.nCopies(items.length(), "?"));
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT T.PLATFORM, A.GENERATION FROM INCOME_AND_EXPENDITURE_DATA T JOIN ALL_NON_INVESTMENT_ASSETS A "
+                        + "ON A.USER_ID=T.USER_ID AND A.NAME=T.PLATFORM WHERE T.USER_ID=? AND T.ID IN (" + placeholders
+                        + ") UNION ALL SELECT T.PLATFORM, A.GENERATION FROM INCOME_AND_EXPENDITURE_DATA T JOIN ALL_INVESTMENT_ASSETS A "
+                        + "ON A.USER_ID=T.USER_ID AND A.INVESTMENT_PLATFORM=T.PLATFORM WHERE T.USER_ID=? AND T.ID IN (" + placeholders + ")")) {
+            int index = 1;
+            for (int part = 0; part < 2; part++) {
+                statement.setInt(index++, userId);
+                for (int i = 0; i < items.length(); i++) statement.setInt(index++, items.getJSONObject(i).getInt("id"));
+            }
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    String previous = generations.putIfAbsent(result.getString(1), result.getString(2));
+                    if (previous != null && !previous.equals(result.getString(2)))
+                        throw new SQLException("Account names are ambiguous.");
+                }
+            }
+        }
+        return generations;
     }
 
     private static String transactionOrder(JSONObject filters) {
@@ -140,7 +167,7 @@ public class ReadData extends DatabaseInit {
             requireCurrency(currency); from += " WHERE VARIOUS_CURRENCIES = ?"; parameters.add(currency);
         }
         try (Connection connection = readConnection()) {
-            JSONObject result = page(connection, "ID AS id, AIR_IN_VARIOUS_CURRENCIES AS annualInflationRate, COALESCE(OBSERVED_THROUGH, DATE) AS observedThrough, "
+            JSONObject result = page(connection, "ID AS id, GENERATION AS generation, AIR_IN_VARIOUS_CURRENCIES AS annualInflationRate, COALESCE(OBSERVED_THROUGH, DATE) AS observedThrough, "
                             + "VARIOUS_CURRENCIES AS currency, DATE AS date",
                     from, parameters, column + " " + direction.toUpperCase(java.util.Locale.ROOT) + ", ID "
                             + direction.toUpperCase(java.util.Locale.ROOT), page, pageSize);
@@ -152,14 +179,14 @@ public class ReadData extends DatabaseInit {
 
     public static JSONObject platformsPage(int userId, int page, int pageSize, String q) throws SQLException {
         requireUser(userId);
-        String from = " FROM (SELECT ID AS id, NAME AS name, CURRENCY AS currency, 'nonInvestment' AS kind "
-                + "FROM ALL_NON_INVESTMENT_ASSETS WHERE USER_ID = ? UNION ALL SELECT ID AS id, "
+        String from = " FROM (SELECT ID AS id, GENERATION AS generation, NAME AS name, CURRENCY AS currency, 'nonInvestment' AS kind "
+                + "FROM ALL_NON_INVESTMENT_ASSETS WHERE USER_ID = ? UNION ALL SELECT ID AS id, GENERATION AS generation, "
                 + "INVESTMENT_PLATFORM AS name, CURRENCY AS currency, 'investment' AS kind "
                 + "FROM ALL_INVESTMENT_ASSETS WHERE USER_ID = ?) P";
         List<Object> parameters = new ArrayList<>(List.of(userId, userId));
         if (q != null && !q.isBlank()) { from += " WHERE LOWER(name) LIKE ? ESCAPE '!'"; parameters.add(search(q)); }
         try (Connection connection = readConnection()) {
-            JSONObject result = page(connection, "id, name, currency, kind", from, parameters,
+            JSONObject result = page(connection, "id, generation, name, currency, kind", from, parameters,
                     "name, kind, id", page, pageSize);
             connection.commit();
             return result;
@@ -168,20 +195,32 @@ public class ReadData extends DatabaseInit {
 
     public static JSONObject profile(int userId) throws SQLException {
         requireUser(userId);
-        try (Connection connection = readConnection(); PreparedStatement statement = connection.prepareStatement(
-                "SELECT ID, FORENAME, SURNAME, EMAIL_ADDRESS FROM USERS WHERE ID = ?")) {
-            statement.setInt(1, userId);
-            try (ResultSet result = statement.executeQuery()) {
-                if (!result.next()) throw new IllegalArgumentException("User does not exist.");
-                return new JSONObject().put("id", result.getInt("ID")).put("forename", result.getString("FORENAME"))
-                        .put("surname", result.getString("SURNAME")).put("emailAddress", result.getString("EMAIL_ADDRESS"));
-            }
+        try (Connection connection = readConnection()) {
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT ID, GENERATION, FORENAME, SURNAME, EMAIL_ADDRESS FROM USERS WHERE ID = ?")) {
+                statement.setInt(1, userId);
+                JSONObject output;
+                try (ResultSet result = statement.executeQuery()) {
+                    if (!result.next()) throw new IllegalArgumentException("User does not exist.");
+                    output = new JSONObject().put("id", result.getInt("ID")).put("generation", result.getString("GENERATION"))
+                            .put("forename", result.getString("FORENAME")).put("surname", result.getString("SURNAME"))
+                            .put("emailAddress", result.getString("EMAIL_ADDRESS"));
+                }
+                connection.commit();
+                return output;
+            } catch (SQLException | RuntimeException failure) { rollback(connection); throw failure; }
         }
     }
 
     public static JSONObject basicVariables(int userId) throws SQLException {
         requireUser(userId);
-        try (Connection connection = readConnection()) { return basicVariables(connection, userId); }
+        try (Connection connection = readConnection()) {
+            try {
+                JSONObject output = basicVariables(connection, userId);
+                connection.commit();
+                return output;
+            } catch (SQLException | RuntimeException failure) { rollback(connection); throw failure; }
+        }
     }
 
     private static JSONObject basicVariables(Connection connection, int userId) throws SQLException {
@@ -428,7 +467,7 @@ public class ReadData extends DatabaseInit {
     }
 
     private static String canonical(String field) {
-        for (String known : List.of("id", "assetName", "amount", "assetType", "riskType", "currency", "date", "investmentPlatform",
+        for (String known : List.of("id", "generation", "assetName", "amount", "assetType", "riskType", "currency", "date", "investmentPlatform",
                 "investmentAmount", "cashWithdrawal", "managementFee", "handlingFee", "buyInAmount", "amountSold", "realTimeAmount",
                 "initialEarnings", "investmentType", "type", "platform", "name", "kind", "annualInflationRate", "observedThrough", "journalId")) {
             if (known.equalsIgnoreCase(field)) return known;
@@ -495,12 +534,13 @@ public class ReadData extends DatabaseInit {
     }
 
     private static Connection readConnection() throws SQLException {
+        // The HTTP identity guard starts the transaction, after selecting its isolation level.
         Connection connection = openConnection();
-        try {
-            connection.setReadOnly(true);
-            connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
-            return connection;
-        } catch (SQLException exception) { connection.close(); throw exception; }
+        if (!DatabaseService.RequestIdentity.isActive()) {
+            try { connection.setReadOnly(true); connection.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ); }
+            catch (SQLException failure) { connection.close(); throw failure; }
+        }
+        return connection;
     }
 
     private static PreparedStatement stream(Connection connection, String sql, int userId) throws SQLException {

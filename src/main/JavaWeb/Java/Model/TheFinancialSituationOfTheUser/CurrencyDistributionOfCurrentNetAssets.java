@@ -5,12 +5,7 @@ import Model.Tools.Computing;
 import Model.UserAssets.InvestmentAsset;
 import Model.UserAssets.NonInvestmentAsset;
 
-/**
- * 职责:
- * 存储流动净资产的不同货币分布
- * 计算流动净资产的不同货币分布
- * (以某种货币)
- */
+/** Calculates current net assets and their proportions by currency. */
 public class CurrencyDistributionOfCurrentNetAssets {
 
     private String amountOfCurrentNetAssetsHeldInGBP = "0.00", amountOfCurrentNetAssetsHeldInCNY = "0.00";

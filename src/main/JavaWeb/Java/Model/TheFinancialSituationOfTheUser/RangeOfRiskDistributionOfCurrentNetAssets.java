@@ -3,12 +3,7 @@ package Model.TheFinancialSituationOfTheUser;
 import Model.Tools.AnnualInflationRatesInVariousCurrencies;
 import Model.Tools.Computing;
 
-/**
- * 职责
- * 储存流动净资产的风险分布范围
- * 计算流动净资产的风险分布范围
- * (以某种货币)
- */
+/** Calculates the target risk distribution of current net assets in a selected currency. */
 public class RangeOfRiskDistributionOfCurrentNetAssets {
 
     private double optimisedAnnualisedInflationRate = 0.0;

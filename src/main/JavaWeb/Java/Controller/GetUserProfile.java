@@ -11,7 +11,7 @@ public class GetUserProfile extends HttpServlet {
     @Override
     protected void doGet(HttpServletRequest request, HttpServletResponse response) {
         ApiSupport.serve(request, response, false, (user, input) -> Model.Controller.ReadData.profile(user, input)
-                .put("isAdmin", ApiSupport.isAdmin(user.getId()))
+                .put("isAdmin", ApiSupport.isAdmin(user))
                 .put("currencies", Model.FixedTypes.Currencies.supported()));
     }
     @Override

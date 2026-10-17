@@ -1,22 +1,10 @@
 #!/usr/bin/env python3
-"""
-把 6.zip 内全部 55 份 HSBC UK Bank statement 中已经逐份校验过的交易，逐条提交到
-/AddIncomeOrExpense（若服务器只提供小写路径，会自动改用 /addIncomeOrExpense）。
+"""Import verified bank transactions through the authenticated income/expense API.
 
-字段映射：
-- Paid in  -> type=income
-- Paid out -> type=expense
-- platform -> HSBC_UK_BANK_ACCOUNT
-- name     -> Payment type and details（包含交易类型代码和完整详情）
-- amount   -> Paid in / Paid out 的正数金额
-- date     -> Date，格式 yyyy-MM-dd
-
-内置数据：55 份 statement，325 条交易；无需在运行电脑上安装 PDF 库，
-也无需把 6.zip 或 PDF 文件与本脚本放在一起。
-
-重要：AddIncomeOrExpense 后端不读取 userID 参数，而是从 JSESSIONID 对应的
-登录 Session 中获取 User。因此必须使用数据库 User ID=2 的账号密码或有效
-JSESSIONID；脚本不会发送无效的 userID=2 表单字段。
+Amounts use exact minor units; dates use YYYY-MM-DD. The selected owner and account
+are pinned to immutable generations for the lifetime of the import. Private source
+files and checkpoints must remain outside published packages. Session ownership is
+verified before the first write; no caller-supplied user ID is sent to the API.
 """
 
 from __future__ import annotations
@@ -38,8 +26,7 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import HTTPCookieProcessor, HTTPRedirectHandler, Request, build_opener
 
 DEFAULT_BASE_URL = "http://localhost:8080/Investment_and_Financial_Management"
-DEFAULT_ENDPOINT = "/AddIncomeOrExpense"
-FALLBACK_ENDPOINT = "/addIncomeOrExpense"
+DEFAULT_ENDPOINT = "/addIncomeOrExpense"
 DEFAULT_LOGIN_ENDPOINT = "/login"
 DEFAULT_PLATFORM = "HSBC_UK_BANK_ACCOUNT"
 EXPECTED_USER_ID = 2
@@ -176,7 +163,8 @@ class FinanceHttpClient:
         self.cookie_jar = http.cookiejar.CookieJar()
         self.opener = build_opener(HTTPCookieProcessor(self.cookie_jar), NoRedirectHandler())
         self.jsessionid = jsessionid.strip() if jsessionid else None
-        self.resolved_add_endpoint: str | None = None
+        self.user_generation = None
+        self._account_generations = {}
 
     def _request(
         self,
@@ -190,6 +178,8 @@ class FinanceHttpClient:
         headers = {"Accept": "application/json", "Origin": origin.scheme + "://" + origin.netloc}
         if self.jsessionid:
             headers["Cookie"] = f"JSESSIONID={self.jsessionid}"
+        if getattr(self, "user_generation", None):
+            headers["X-IAFM-User-Generation"] = self.user_generation
 
         if form is not None:
             body = urlencode(form).encode("utf-8")
@@ -223,38 +213,52 @@ class FinanceHttpClient:
             raise ImportErrorWithMessage("登录接口没有返回有效 JSON") from exc
         if result.get("status") not in ("success", "already_logged_in"):
             raise ImportErrorWithMessage(result.get("message", "登录失败"))
+        self.user_generation = None
+        self._account_generations = {}
+
+    def _identity_form(self, transaction: Transaction) -> dict[str, str]:
+        """Pin the selected owner and account once; never silently follow a recycled ID."""
+        if not getattr(self, "user_generation", None):
+            status, body, _headers = self._request("/getUserProfile")
+            profile = self._successful_json(status, body, "Identity")
+            generation = profile.get("userGeneration")
+            if profile.get("id") != EXPECTED_USER_ID or not isinstance(generation, str) or len(generation) != 36:
+                raise ImportErrorWithMessage("The authenticated owner does not match this import.")
+            self.user_generation = generation
+        form = transaction.form_data()
+        platform = form.get("platform")
+        if not isinstance(platform, str) or not platform:
+            raise ImportErrorWithMessage("The import account is missing.")
+        if not hasattr(self, "_account_generations"):
+            self._account_generations = {}
+        if platform not in self._account_generations:
+            page, matches = 1, []
+            while True:
+                status, body, _headers = self._request("/getPlatforms", json_data={"page": page, "pageSize": 100, "q": platform})
+                result = self._successful_json(status, body, "Account identity")
+                items = result.get("items")
+                if not isinstance(items, list) or len(items) > 100 or type(result.get("hasNext")) is not bool:
+                    raise ImportErrorWithMessage("Invalid account pagination.")
+                matches.extend(item for item in items if isinstance(item, dict) and item.get("name") == platform)
+                if not result["hasNext"]:
+                    break
+                if not items:
+                    raise ImportErrorWithMessage("Incomplete account pagination.")
+                page += 1
+            if len(matches) != 1 or not isinstance(matches[0].get("generation"), str) or len(matches[0]["generation"]) != 36:
+                raise ImportErrorWithMessage("The import account is missing, ambiguous, or has no generation.")
+            self._account_generations[platform] = matches[0]["generation"]
+        form["platformGeneration"] = self._account_generations[platform]
+        return form
 
     def add_transaction(self, endpoint: str, transaction: Transaction) -> str:
-        candidates: list[str]
-        if self.resolved_add_endpoint:
-            candidates = [self.resolved_add_endpoint]
-        else:
-            first = endpoint if endpoint.startswith("/") else "/" + endpoint
-            alternate = (
-                FALLBACK_ENDPOINT
-                if first == DEFAULT_ENDPOINT
-                else DEFAULT_ENDPOINT
-                if first == FALLBACK_ENDPOINT
-                else None
-            )
-            candidates = [first] + ([alternate] if alternate else [])
-
-        last_error: Exception | None = None
-        for candidate in candidates:
-            try:
-                status, body, _headers = self._request(
-                    candidate, form=transaction.form_data()
-                )
-                self._successful_json(status, body, "新增")
-                self.resolved_add_endpoint = candidate
-                return candidate
-            except HttpRequestError as exc:
-                last_error = exc
-                if exc.code == 404 and len(candidates) > 1 and candidate != candidates[-1]:
-                    continue
-                raise
-        assert last_error is not None
-        raise last_error
+        # Normalize the historical spelling before the single financial POST.
+        selected = endpoint if endpoint.startswith("/") else "/" + endpoint
+        if selected == "/AddIncomeOrExpense":
+            selected = DEFAULT_ENDPOINT
+        status, body, _headers = self._request(selected, form=self._identity_form(transaction))
+        self._successful_json(status, body, "新增")
+        return selected
 
     @staticmethod
     def _successful_json(status: int, body: bytes, operation: str) -> dict[str, Any]:
@@ -331,14 +335,10 @@ def save_checkpoint(path: Path, completed: set[str]) -> None:
 
 
 def prompt_password() -> str:
-    # PyCharm 的 Run 窗口经常不能正确配合 getpass；在该环境下使用普通输入，
-    # 避免看起来“卡住”。Terminal 中仍使用隐藏输入。
-    if os.getenv("PYCHARM_HOSTED") or not sys.stdin.isatty():
-        return input("请输入登录密码（当前窗口会显示输入内容）：").strip()
-    try:
-        return getpass.getpass("请输入登录密码：")
-    except Exception:
-        return input("请输入登录密码（输入会显示）：").strip()
+    """Require a terminal that supports hidden credential entry."""
+    if not sys.stdin.isatty():
+        raise ImportErrorWithMessage("Run in a terminal for hidden password entry, or provide a valid session.")
+    return getpass.getpass("请输入登录密码：")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -357,8 +357,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--delay", type=float, default=0.05, help="每条请求后的间隔秒数")
     parser.add_argument("--timeout", type=float, default=30.0, help="单次 HTTP 超时秒数")
     parser.add_argument(
-        "--retries", type=int, default=1,
-        help="单条最多尝试次数；超时后重试可能重复写入，默认 1",
+        "--retries", type=int, choices=(1,), default=1,
+        help="仅允许 1；金融写入不自动重试，失败后须先核对服务器记录",
     )
     parser.add_argument("--limit", type=int, help="本次最多导入 N 条待处理记录")
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT, help="断点文件")
@@ -376,8 +376,8 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.delay < 0:
         raise ImportErrorWithMessage("--delay 不能小于 0")
-    if args.retries < 1:
-        raise ImportErrorWithMessage("--retries 至少为 1")
+    if args.retries != 1:
+        raise ImportErrorWithMessage("--retries must be 1: financial writes are never retried automatically.")
 
     checkpoint_path = Path(args.checkpoint).expanduser().resolve()
     transactions = load_embedded_transactions()
@@ -451,24 +451,13 @@ def main() -> int:
     succeeded = 0
     reported_endpoint: str | None = None
     for index, tx in enumerate(pending, 1):
-        last_error: Exception | None = None
-        used_endpoint: str | None = None
-        for attempt in range(1, args.retries + 1):
-            try:
-                used_endpoint = client.add_transaction(args.endpoint, tx)
-                last_error = None
-                break
-            except ImportErrorWithMessage as exc:
-                last_error = exc
-                if "Session" in str(exc) or "重定向" in str(exc):
-                    raise
-                if attempt < args.retries:
-                    time.sleep(min(2 ** (attempt - 1), 8))
-
-        if last_error is not None:
+        try:
+            used_endpoint = client.add_transaction(args.endpoint, tx)
+        except Exception as exc:
             raise ImportErrorWithMessage(
-                f"{tx.source_id} 导入失败：{last_error}"
-            ) from last_error
+                f"{tx.source_id}: import stopped without retry. The server may have committed this record; "
+                "reconcile it against the source and checkpoint before restarting. " + str(exc)
+            ) from exc
 
         if used_endpoint and used_endpoint != reported_endpoint:
             print(f"实际使用新增接口：{used_endpoint}")
@@ -498,8 +487,7 @@ def main() -> int:
             )
 
     print(
-        "完成。Servlet 即使数据库写入失败也可能返回 HTTP 200；"
-        "建议使用 --verify-count，并检查服务器日志。"
+        "完成：每条写入均已收到明确成功响应。建议使用 --verify-count 核对服务器记录。"
     )
     return 0
 
@@ -508,7 +496,7 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
-        print("\n已中断；下次运行会从断点继续。", file=sys.stderr)
+        print("\n已中断。正在提交的记录可能已写入；重新运行前，请先核对服务器记录与检查点。", file=sys.stderr)
         raise SystemExit(130)
     except ImportErrorWithMessage as exc:
         print(f"错误：{exc}", file=sys.stderr)

@@ -31,12 +31,14 @@ public class DatabaseInit implements ServletContextListener {
                 try (ResultSet inflationLock = statement.executeQuery("SELECT ID FROM INFLATION_SERIES_LOCK WHERE ID = 1")) {
                     if (!inflationLock.next()) throw new SQLException("Inflation schema migration is required.");
                 }
+                CreateAllTables.verifyIdSchema(connection);
                 java.sql.DatabaseMetaData metadata = connection.getMetaData();
                 event.getServletContext().log("IAFM database driver: " + metadata.getDriverName() + " " + metadata.getDriverVersion());
             } catch (SQLException unavailable) {
                 throw new IllegalStateException("Database migrations must be applied before startup.", unavailable);
             }
         }
+        new SetIds().setAllIds();
     }
 
     @Override
@@ -68,10 +70,14 @@ public class DatabaseInit implements ServletContextListener {
             try {
                 connection.setReadOnly(false);
                 connection.setAutoCommit(false);
-                connection.setTransactionIsolation(Connection.TRANSACTION_READ_COMMITTED);
+                connection.setTransactionIsolation(RequestIdentity.isReadRequest()
+                        ? Connection.TRANSACTION_REPEATABLE_READ : Connection.TRANSACTION_READ_COMMITTED);
+                RequestIdentity.validateUser(connection);
                 return connection;
-            } catch (SQLException exception) {
-                connection.close();
+            } catch (SQLException | RuntimeException exception) {
+                // A failed identity check may already hold row locks; release them before returning a pooled connection.
+                try { connection.rollback(); } catch (SQLException failure) { exception.addSuppressed(failure); }
+                try { connection.close(); } catch (SQLException failure) { exception.addSuppressed(failure); }
                 throw exception;
             }
         } catch (SQLException | NamingException exception) {
@@ -111,74 +117,106 @@ public class DatabaseInit implements ServletContextListener {
         }
     }
 
-    /**
-     * Existing recorder tables hold a fixed lock marker and one non-positive sequence row. Positive legacy recycled
-     * IDs are preserved, but are no longer reused. The small allocation transaction commits
-     * before business writes, so an account transaction never holds the sequence lock.
-     */
-    protected static int nextId(String table) throws SQLException {
-        if (!java.util.Set.of("USERS", "ALL_NON_INVESTMENT_ASSETS", "ALL_INVESTMENT_ASSETS",
-                "BASIC_VARIABLES_AND_DATA", "INCOME_AND_EXPENDITURE_DATA",
-                "ANNUAL_INFLATION_RATES_IN_VARIOUS_CURRENCIES").contains(table)) {
-            throw new IllegalArgumentException("Unsupported ID sequence.");
-        }
-        String recorder = "ID_RECORDER_" + table;
-        SQLException last = null;
-        for (int attempt = 0; attempt < 12; attempt++) {
-            try (Connection connection = openConnection()) {
-                try {
-                    // A fixed marker is essential: locking a sequence row whose primary key
-                    // changes can otherwise miss the moved row under concurrent initialization.
-                    try (PreparedStatement statement = connection.prepareStatement("INSERT INTO " + recorder
-                            + " (TABLE_ID) VALUES (?) ON DUPLICATE KEY UPDATE TABLE_ID = TABLE_ID")) {
-                        statement.setInt(1, Integer.MIN_VALUE);
-                        statement.executeUpdate();
-                    }
-                    try (PreparedStatement statement = connection.prepareStatement("SELECT TABLE_ID FROM " + recorder + " WHERE TABLE_ID = ? FOR UPDATE")) {
-                        statement.setInt(1, Integer.MIN_VALUE);
-                        try (ResultSet result = statement.executeQuery()) {
-                            if (!result.next()) throw new SQLException("ID lock marker is unavailable.", "40001");
-                        }
-                    }
-                    Integer previous = null;
-                    try (PreparedStatement statement = connection.prepareStatement("SELECT TABLE_ID FROM " + recorder
-                            + " WHERE TABLE_ID <= 0 AND TABLE_ID > ? ORDER BY TABLE_ID LIMIT 1 FOR UPDATE")) {
-                        statement.setInt(1, Integer.MIN_VALUE);
-                        try (ResultSet result = statement.executeQuery()) {
-                            if (result.next()) previous = result.getInt(1);
-                        }
-                    }
-                    long maximum = 0;
-                    if (previous == null) {
-                        try (PreparedStatement statement = connection.prepareStatement("SELECT MAX(ID) FROM " + table);
-                             ResultSet result = statement.executeQuery()) {
-                            if (result.next()) maximum = result.getLong(1);
-                        }
-                        try (PreparedStatement statement = connection.prepareStatement("SELECT MAX(TABLE_ID) FROM " + recorder);
-                             ResultSet result = statement.executeQuery()) {
-                            if (result.next()) maximum = Math.max(maximum, result.getLong(1));
-                        }
-                    } else maximum = -(long) previous;
-                    if (maximum >= Integer.MAX_VALUE) throw new SQLException("The integer ID range is exhausted.");
-                    int next = (int) maximum + 1;
-                    String sql = previous == null ? "INSERT INTO " + recorder + " (TABLE_ID) VALUES (?)"
-                            : "UPDATE " + recorder + " SET TABLE_ID = ? WHERE TABLE_ID = ?";
-                    try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                        statement.setInt(1, -next);
-                        if (previous != null) statement.setInt(2, previous);
-                        if (statement.executeUpdate() != 1) throw new SQLException("ID allocation conflict.", "40001");
-                    }
-                    connection.commit();
-                    return next;
-                } catch (SQLException exception) {
-                    rollback(connection);
-                    String state = exception.getSQLState();
-                    if (state == null || !(state.startsWith("23") || state.startsWith("40"))) throw exception;
-                    last = exception;
+    static final java.util.List<String> ID_TABLES = java.util.List.of(
+            "ALL_INVESTMENT_ASSETS", "ALL_NON_INVESTMENT_ASSETS",
+            "ANNUAL_INFLATION_RATES_IN_VARIOUS_CURRENCIES", "BASIC_VARIABLES_AND_DATA",
+            "INCOME_AND_EXPENDITURE_DATA", "USERS");
+
+    static void requireIdTable(String table) {
+        if (!ID_TABLES.contains(table)) throw new IllegalArgumentException("Unsupported recyclable ID table.");
+    }
+
+    /** Lock owner first, then every required allocator in this canonical order before changing IDs. */
+    public static void lockIdTables(Connection connection, String... tables) throws SQLException {
+        if (connection.getAutoCommit()) throw new SQLException("ID allocation requires an explicit business transaction.");
+        java.util.SortedSet<String> ordered = new java.util.TreeSet<>(java.util.Arrays.asList(tables));
+        for (String table : ordered) {
+            requireIdTable(table);
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT HIGH_WATER FROM ID_ALLOCATION_STATE WHERE TABLE_NAME=? FOR UPDATE")) {
+                statement.setString(1, table);
+                try (ResultSet result = statement.executeQuery()) {
+                    if (!result.next()) throw new SQLException("ID schema migration is required before writes.");
                 }
             }
         }
-        throw new SQLException("ID allocation is busy; retry the request.", last);
+    }
+
+    /** Claim an ID in the insertion transaction. Insert it before allocating again for the same table. */
+    protected static int nextId(Connection connection, String table) throws SQLException {
+        lockIdTables(connection, table);
+        String recorder = "ID_RECORDER_" + table;
+        while (true) {
+            Integer point = null, first = null, last = null;
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT MIN(TABLE_ID) FROM " + recorder + " WHERE TABLE_ID>0");
+                 ResultSet result = statement.executeQuery()) {
+                if (result.next()) { int value = result.getInt(1); if (!result.wasNull()) point = value; }
+            }
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT FIRST_ID,LAST_ID FROM ID_RECOVERY_RANGES WHERE TABLE_NAME=? ORDER BY FIRST_ID LIMIT 1")) {
+                statement.setString(1, table);
+                try (ResultSet result = statement.executeQuery()) {
+                    if (result.next()) { first = result.getInt(1); last = result.getInt(2); }
+                }
+            }
+            if (point == null && first == null) break;
+            int candidate = point == null ? first : first == null ? point : Math.min(point, first);
+            try (PreparedStatement statement = connection.prepareStatement("DELETE FROM " + recorder + " WHERE TABLE_ID=?")) {
+                statement.setInt(1, candidate); statement.executeUpdate();
+            }
+            if (first != null && candidate == first) {
+                String sql = first.equals(last)
+                        ? "DELETE FROM ID_RECOVERY_RANGES WHERE TABLE_NAME=? AND FIRST_ID=?"
+                        : "UPDATE ID_RECOVERY_RANGES SET FIRST_ID=? WHERE TABLE_NAME=? AND FIRST_ID=?";
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    int parameter = 1;
+                    if (!first.equals(last)) statement.setInt(parameter++, candidate + 1);
+                    statement.setString(parameter++, table); statement.setInt(parameter, candidate); statement.executeUpdate();
+                }
+            }
+            // Invalid legacy recycle rows are removed, never assigned to a live or referenced record.
+            if (!SetIds.isUnavailable(connection, table, candidate)) {
+                rememberHighWater(connection, table, candidate);
+                return candidate;
+            }
+        }
+        long maximum;
+        try (PreparedStatement statement = connection.prepareStatement("SELECT COALESCE(MAX(ID),0) FROM " + table);
+             ResultSet result = statement.executeQuery()) { result.next(); maximum = result.getLong(1); }
+        if (maximum < 0 || maximum >= Integer.MAX_VALUE) throw new SQLException("The integer ID range is exhausted.");
+        int candidate = (int) maximum + 1;
+        if (SetIds.isUnavailable(connection, table, candidate)) {
+            throw new SQLException("The next ID has surviving references; repair those references before inserting.");
+        }
+        rememberHighWater(connection, table, candidate);
+        return candidate;
+    }
+
+    static void rememberHighWater(Connection connection, String table, int id) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "UPDATE ID_ALLOCATION_STATE SET HIGH_WATER=CASE WHEN HIGH_WATER<? THEN ? ELSE HIGH_WATER END WHERE TABLE_NAME=?")) {
+            statement.setInt(1, id); statement.setInt(2, id); statement.setString(3, table);
+            // MySQL may report zero changed rows when a recycled ID is below the high-water mark.
+            statement.executeUpdate();
+        }
+    }
+
+    /** Recycle only after the actual deletion and all dependent deletions, using the same transaction. */
+    public static void recycleId(Connection connection, String table, int id) throws SQLException {
+        if (id <= 0) throw new IllegalArgumentException("Only positive IDs can be recycled.");
+        lockIdTables(connection, table);
+        if (SetIds.isUnavailable(connection, table, id)) throw new SQLException("A live or referenced ID cannot be recycled.");
+        rememberHighWater(connection, table, id);
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT FIRST_ID FROM ID_RECOVERY_RANGES WHERE TABLE_NAME=? AND FIRST_ID<=? AND LAST_ID>=?")) {
+            statement.setString(1, table); statement.setInt(2, id); statement.setInt(3, id);
+            try (ResultSet result = statement.executeQuery()) { if (result.next()) return; }
+        }
+        try (PreparedStatement statement = connection.prepareStatement("INSERT INTO ID_RECORDER_" + table
+                + " (TABLE_ID) VALUES (?) ON DUPLICATE KEY UPDATE TABLE_ID=TABLE_ID")) {
+            statement.setInt(1, id); statement.executeUpdate();
+        }
     }
 
     protected static java.sql.Date recordDate(String value) {

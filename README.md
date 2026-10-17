@@ -1,28 +1,52 @@
 # Investment and Financial Management
 
-Investment and Financial Management (IAFM) is a Java web application for personal financial records, assets, transfers and reports.
+Java 21 / Servlet 4 / Tomcat 9 personal finance application. The original Controller / Model / DatabaseService layout and String-based monetary interfaces are retained. Money calculations use exact minor units; exchange rates are handled separately at high precision.
 
-- [Live application](https://iafm.zhongjiehuang.com/)
-- [Project portfolio](https://www.zhongjiehuang.com/)
-- [Deployment notes](DEPLOYMENT_UPDATE_2026-10-17.md)
-- [Implementation and configuration](README_FIXES_ZH.md)
-- [Verification record](VERIFICATION.json)
+## Build and test
 
-The full project name remains `Investment_and_Financial_Management`; IAFM is its short name.
-
-## Build
-
-Use Java 21 and Maven. Run each command separately from this directory:
+Use Java 21 and Maven:
 
 ```sh
-mvn test
-mvn package
+mvn clean package
+python3 -m unittest discover -s src/test/python
 ```
 
-Configure the database and exchange-rate provider through the documented environment or server configuration. Keep credentials outside this repository. Preserve the existing application database when deploying an update.
+The deployable is `target/Investment_and_Financial_Management.war`. MySQL 8.0.13 or newer is required for generation defaults. Normal tests use isolated H2 fixtures. To exercise actual MySQL, start a disposable loopback MySQL instance and explicitly provide the test-only connection properties documented in `IdRecoveryTest`, `CascadeDeletionTest`, and `RequestIdentityIntegrationTest`. Never point destructive fixture tests at a production schema. `IdRecoveryTest` includes two independent Java process workers when MySQL is selected. The optional Python inflation test uses `IAFM_INFLATION_TEST_MYSQL_PORT` and a disposable loopback schema.
 
-## Data privacy
+## Runtime configuration
 
-This repository contains application code, tests and generic import tools. Private bank statements, account credentials, import checkpoints and runtime database files are excluded. Importers read owner-supplied local inputs; see [Python import privacy notes](src/main/Python/PRIVACY.md).
+Set these outside the repository and deployment archive:
 
-The public repository starts from a reviewed source snapshot. Earlier private development history and its historical binaries are kept separately in a private archive repository.
+- `IAFM_DB_URL`, `IAFM_DB_USER`, `IAFM_DB_PASSWORD`, or `IAFM_DB_JNDI` for a configured DataSource.
+- `IAFM_SCHEMA_AUTO_INIT=false` in production; apply schema changes with a maintenance identity before startup. The runtime identity needs SELECT, INSERT, UPDATE and DELETE on this application's schema only.
+- `IAFM_ADMIN_USER_IDS` as comma-separated `id:generation` bindings. `generation` is the immutable UUID in `USERS.GENERATION`.
+- Optional read-only `IAFM_API_KEYS` as semicolon-separated `id:generation:sha256hex` bindings. Generate a key with `scripts/export_user_data.py`; never publish raw keys.
+- `IAFM_EXCHANGE_RATE_API_KEY` or the existing `iafm/exchangeRateApiKey` context Environment entry. Preserve the provider's daily cache across deployments.
+
+Existing numeric-only administrator/API bindings deliberately fail closed. During a controlled migration, bind each existing configured user to its current generation after backfill. Do not automatically bind a recycled ID to a new person.
+
+## Maintenance and migration
+
+Stop incompatible application and import writers before migration. Take a full database backup and a copy of the current WAR and private Tomcat configuration. Restore the database backup into a separate database and verify original table counts, field hashes, associations and journal balance before applying changes to production.
+
+Run the existing `DatabaseService.CreateAllTables` main entry with Java 21, the application classes and dependencies, the Servlet API, and the maintenance database configuration. With an exploded WAR and a Tomcat installation the command is:
+
+```sh
+java -cp 'WEB-INF/classes:WEB-INF/lib/*:/usr/share/tomcat9/lib/servlet-api.jar' DatabaseService.CreateAllTables
+```
+
+Use the actual Servlet API path on the target host. MySQL DDL commits implicitly: a failed schema migration requires inspecting its state and either completing the idempotent migration or restoring the validated backup while writers remain stopped. Changing `IAFM_DB_URL` selects the isolated rehearsal database. Do not run this entry against production until rehearsal succeeds.
+
+The migration adds immutable record generations, explicit ID coordination/high-water metadata, and compact recovery ranges for large historical gaps. Existing recorder tables retain explicit recycled IDs. `SetIds` reconciles every recyclable table on each startup; startup fails if consistency cannot be established. Allocation, insertion, deletion and recycling share the business transaction. Small recoverable gaps are restored to recorder tables; large gaps are represented as ranges without loading or inserting billions of integers.
+
+Account deletion includes its related transactions and complete paired transfers, reverses the surviving counterpart's balance, removes ledger children explicitly and recycles all released integer IDs. Ambiguous historical transfers or corrupt ownership references require evidence-based repair; they are never silently guessed or discarded. `POST /deleteUser` removes only the authenticated user's data and invalidates that session.
+
+## HTTP identity contract
+
+Successful login/read responses expose `userGeneration`. Mutation requests send it in `X-IAFM-User-Generation`. List rows expose `generation`; edits/deletes submit the captured value. Income/expense requests include `platformGeneration`; transfers include `fromPlatformGeneration` and `toPlatformGeneration`. Selectors expose account generations. Missing/stale identities fail closed, so old pages cannot change a replacement row that reuses an integer ID. The UI and bank importers preserve the identities captured when data were selected.
+
+Keep HTTPS, same-origin checks, Secure/HttpOnly cookies and the existing ten-minute session timeout. The reverse proxy must overwrite Host and forwarding headers; only loopback forwarding is trusted. Public registration remains controlled by the existing servlet policy. Lists default to 100 rows per page and enforce a server-side limit.
+
+## Private data
+
+The source package excludes credentials, bank statements, private transaction payloads, checkpoints, database backups and compiled output. Importers read owner-supplied private input; see `src/main/Python/PRIVACY.md`. Existing migration scripts default to dry-run and require a private backup before writes. Inflation provenance and input boundaries are documented in `tools/inflation/README.md`.

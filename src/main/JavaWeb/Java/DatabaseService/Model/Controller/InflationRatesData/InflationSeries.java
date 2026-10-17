@@ -54,11 +54,13 @@ public final class InflationSeries extends DatabaseInit {
     }
 
     private static void lock(Connection connection) throws SQLException {
-        // Separate from the ID recorder: nextId() uses a short independent transaction.
+        // Acquire the shared-series lock before its allocator; startup never takes this lock.
         try (PreparedStatement statement = connection.prepareStatement("SELECT ID FROM INFLATION_SERIES_LOCK WHERE ID=1 FOR UPDATE");
              ResultSet result = statement.executeQuery()) {
             if (!result.next()) throw new SQLException("Inflation schema migration is required.");
         }
+        lockIdTables(connection, TABLE);
+        DatabaseService.RequestIdentity.validateSharedRecords(connection);
     }
 
     private static List<Span> read(Connection connection) throws SQLException {
@@ -101,7 +103,11 @@ public final class InflationSeries extends DatabaseInit {
         for (Span span : before) old.put(span.id(), span);
         for (Span span : after) current.put(span.id(), span);
         try (PreparedStatement delete = connection.prepareStatement("DELETE FROM " + TABLE + " WHERE ID=?")) {
-            for (Span span : before) if (!current.containsKey(span.id())) { delete.setInt(1, span.id()); delete.executeUpdate(); }
+            for (Span span : before) if (!current.containsKey(span.id())) {
+                delete.setInt(1, span.id());
+                if (delete.executeUpdate() != 1) throw new SQLException("Inflation deletion did not affect one row.");
+                recycleId(connection, TABLE, span.id());
+            }
         }
         try (PreparedStatement update = connection.prepareStatement("UPDATE " + TABLE + " SET VARIOUS_CURRENCIES=?,DATE=?,OBSERVED_THROUGH=?,AIR_IN_VARIOUS_CURRENCIES=? WHERE ID=?");
              PreparedStatement insert = connection.prepareStatement("INSERT INTO " + TABLE + " (VARIOUS_CURRENCIES,DATE,OBSERVED_THROUGH,AIR_IN_VARIOUS_CURRENCIES,ID) VALUES (?,?,?,?,?)")) {
@@ -135,15 +141,19 @@ public final class InflationSeries extends DatabaseInit {
     public static boolean add(double value, String currency, String dateValue) {
         BigDecimal valueExact = rate(value); Model.FixedTypes.Currencies.valueOf(currency); LocalDate month = date(dateValue);
         try {
-            int id = nextId(TABLE); // Allocate before taking the independent inflation-series lock.
             return transact(connection -> {
                 lock(connection); List<Span> before = read(connection);
                 for (Span span : before) if (contains(span, currency, month)) {
                     if (span.rate().compareTo(valueExact) == 0) return true;
                     throw new InflationRateException(409, "This month already has a different inflation rate. Edit or delete the existing interval first.");
                 }
+                int id = nextId(connection, TABLE);
                 List<Span> after = new ArrayList<>(before); after.add(new Span(id, currency, month, month, valueExact));
-                save(connection, before, compact(after)); return true;
+                List<Span> compacted = compact(after);
+                save(connection, before, compacted);
+                // Compaction may absorb the allocated row into a pre-existing interval.
+                if (compacted.stream().noneMatch(span -> span.id() == id)) recycleId(connection, TABLE, id);
+                return true;
             });
         } catch (SQLException failure) { throw new IllegalStateException("Inflation rate could not be added.", failure); }
     }

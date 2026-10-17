@@ -13,10 +13,10 @@ public class AddAsset extends DatabaseInit {
                 databaseAmount(command.getAmountSold()), databaseAmount(command.getRealTimeAmount()), decimalAmount(command.getInitialEarnings())};
         CommonFunctions.validate(command.getInvestmentPlatform(), command.getInvestmentType(), command.getRiskType(), command.getCurrency());
         try {
-            int id = nextId("ALL_INVESTMENT_ASSETS");
             try (Connection connection = openConnection()) {
                 try {
                     lockUser(connection, userID);
+                    int id = nextId(connection, "ALL_INVESTMENT_ASSETS");
                     CommonFunctions.available(connection, userID, command.getInvestmentPlatform(), null, 0);
                     try (PreparedStatement statement = connection.prepareStatement("INSERT INTO ALL_INVESTMENT_ASSETS "
                             + "(ID, USER_ID, INVESTMENT_AMOUNT, CASH_WITHDRAWAL, MANAGEMENT_FEE, HANDLING_FEE, BUY_IN_AMOUNT, AMOUNT_SOLD, "

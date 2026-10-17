@@ -27,7 +27,8 @@
         lockMinutes: Number(localStorage.getItem(STORE.lock) || 9),
         user: {
             name: sessionStorage.getItem('userName') || '',
-            account: sessionStorage.getItem('userAccount') || ''
+            account: sessionStorage.getItem('userAccount') || '',
+            generation: sessionStorage.getItem('userGeneration') || ''
         },
         authTab: 'login', page: 'overview', sidebarOpen: false, loading: new Set(),
         assets: null, transactions: null, recentTransactions: null, report: null, cashflowSummary: null,
@@ -158,6 +159,7 @@
             cancel: 'Cancel',
             confirmDelete: 'Delete this record?',
             destructiveDesc: 'This action updates your server records and cannot be undone.',
+            deleteAccountDesc: 'This deletes the account and its linked income, expenses, and paired transfers. Balances of surviving transfer accounts will be adjusted. This cannot be undone.',
             allTransactions: 'All transactions',
             income: 'Income',
             expense: 'Expense',
@@ -473,6 +475,7 @@
             cancel: '取消',
             confirmDelete: '确定删除该记录？',
             destructiveDesc: '此操作会更新服务器记录，且无法撤销。',
+            deleteAccountDesc: '这将删除该账户及其关联收支和成对转账，并调整保留的转账对方账户余额。此操作无法撤销。',
             allTransactions: '全部收支',
             income: '收入',
             expense: '支出',
@@ -823,6 +826,7 @@
             signal: controller.signal,
             headers: {'Accept': 'application/json'}
         };
+        if (state.user.generation) init.headers['X-IAFM-User-Generation'] = state.user.generation;
         if (options.json !== undefined) {
             init.headers['Content-Type'] = 'application/json; charset=UTF-8';
             init.body = JSON.stringify(options.json);
@@ -839,6 +843,8 @@
             if (response.status === 401) throw Object.assign(new Error(data?.message || t('sessionExpired')), {sessionExpired: true});
             if (!response.ok) throw new Error(data?.message || `${t('networkError')} (${response.status})`);
             if (!data) throw new Error(t('networkError'));
+            if (endpoint !== '/login' && state.user.generation && data.userGeneration && state.user.generation !== data.userGeneration)
+                throw Object.assign(new Error(t('sessionExpired')), {sessionExpired: true});
             if (data.status === 'failure' || data.status === 'error') throw new Error(data.message || t('error'));
             return data;
         } catch (error) {
@@ -859,6 +865,7 @@
     function clearSession() {
         sessionStorage.removeItem('userName');
         sessionStorage.removeItem('userAccount');
+        sessionStorage.removeItem('userGeneration');
         state.sessionVersion++;
         renderVersion++;
         pendingRequests.clear();
@@ -889,7 +896,7 @@
     }
 
     function isAuthed() {
-        return Boolean(state.user.name || state.user.account);
+        return Boolean(state.user.generation && (state.user.name || state.user.account));
     }
 
     function currentPage() {
@@ -1084,9 +1091,11 @@
             if (data.status === 'success' || data.status === 'already_logged_in') {
                 const name = data.userName || sessionStorage.getItem('userName') || data.userAccount || 'User';
                 const account = data.userAccount || form.emailAddress.value;
+                clearSession();
                 sessionStorage.setItem('userName', name);
                 sessionStorage.setItem('userAccount', account);
-                state.user = {name, account};
+                sessionStorage.setItem('userGeneration', data.userGeneration);
+                state.user = {name, account, generation: data.userGeneration};
                 location.hash = '#/overview';
                 render();
             } else throw new Error(data.message || t('error'));
@@ -1626,6 +1635,7 @@
             return;
         }
         const params = new URLSearchParams(new FormData(form));
+        if (item) params.set('generation', item.generation);
         const endpoint = kind === 'investment' ? (item ? '/editInvestmentAsset' : '/addInvestmentAsset') : (item ? '/editNonInvestmentAsset' : '/addNonInvestmentAsset');
         const btn = $('#saveAsset');
         if (btn) btn.disabled = true;
@@ -1642,9 +1652,12 @@
     }
 
     function deleteAsset(kind, id) {
-        showConfirm(t('confirmDelete'), t('destructiveDesc'), async () => {
+        const items = kind === 'investment' ? state.assets?.investments : state.assets?.nonInvestments;
+        const item = items?.find(row => String(row.id) === String(id));
+        if (!item) return;
+        showConfirm(t('confirmDelete'), t('deleteAccountDesc'), async () => {
             try {
-                await api(kind === 'investment' ? '/deleteInvestmentAsset' : '/deleteNonInvestmentAsset', {form: {id}});
+                await api(kind === 'investment' ? '/deleteInvestmentAsset' : '/deleteNonInvestmentAsset', {form: {id, generation: item.generation}});
                 invalidateFinancialData();
                 await renderPage();
                 toast(t('deletedMessage'));
@@ -1709,12 +1722,28 @@
         $$('[data-delete-tx]').forEach(b => b.addEventListener('click', () => deleteTransaction(state.transactions.items.find(x => String(x.id) === b.dataset.deleteTx))));
     }
 
-    function platformInput(name, value = '', required = true, placeholder = '') {
-        return `<input class="input" id="${name}" name="${name}" value="${attr(value)}" list="${name}Options" data-platform-search autocomplete="off" placeholder="${attr(placeholder)}" aria-label="${attr(placeholder || t('platform'))}" ${required ? 'required' : ''}><datalist id="${name}Options">${platformOptions(state.platforms?.items || [])}</datalist>`;
+    function platformInput(name, value = '', required = true, placeholder = '', generation = '') {
+        generation ||= state.platforms?.items?.find(item => item.name === value)?.generation || '';
+        return `<input class="input" id="${name}" name="${name}" value="${attr(value)}" list="${name}Options" data-generation="${attr(generation)}" data-generation-name="${attr(value)}" data-platform-search autocomplete="off" placeholder="${attr(placeholder)}" aria-label="${attr(placeholder || t('platform'))}" ${required ? 'required' : ''}><datalist id="${name}Options">${platformOptions(state.platforms?.items || [])}</datalist>`;
     }
 
     function platformOptions(items) {
-        return items.map(item => `<option value="${attr(item.name)}">${esc(item.currency)}</option>`).join('');
+        return items.map(item => `<option value="${attr(item.name)}" data-generation="${attr(item.generation)}">${esc(item.currency)}</option>`).join('');
+    }
+
+    function capturePlatformIdentity(input) {
+        if (input.dataset.generationName !== input.value) input.dataset.generation = '';
+        input.dataset.generationName = input.value;
+        if (!input.dataset.generation) {
+            const option = Array.from(document.getElementById(`${input.id}Options`)?.options || []).find(row => row.value === input.value);
+            input.dataset.generation = option?.dataset.generation || '';
+        }
+    }
+
+    function addPlatformIdentity(values, name) {
+        const input = document.getElementById(name);
+        capturePlatformIdentity(input);
+        values.set(`${name}Generation`, input.dataset.generation || '');
     }
 
     function bindPlatformInputs() {
@@ -1723,6 +1752,7 @@
             input.dataset.searchBound = 'true';
             let timer;
             input.addEventListener('input', () => {
+                capturePlatformIdentity(input);
                 clearTimeout(timer);
                 const query = input.value;
                 timer = setTimeout(async () => {
@@ -1731,6 +1761,7 @@
                         if (input.isConnected && input.value === query) {
                             const list = document.getElementById(`${input.id}Options`);
                             if (list) list.innerHTML = platformOptions(data.items || []);
+                            capturePlatformIdentity(input);
                         }
                     } catch (error) {
                         if (!error.staleRequest && input.isConnected) toast(error.message, 'bad');
@@ -1748,7 +1779,7 @@
         const dateFields = item
             ? `${selectField('monthOfYear', t('month'), Array.from({length: 12}, (_, i) => String(i + 1).padStart(2, '0')), String(item.monthOfYear).padStart(2, '0'), m => monthName(m))}${selectField('dateOfMonth', t('day'), Array.from({length: 31}, (_, i) => String(i + 1).padStart(2, '0')), String(item.dateOfMonth).padStart(2, '0'))}${field('year', t('year'), item.year, 'number', true)}`
             : `<div class="form-group"><label class="form-label" for="date">${t('date')}</label><input class="input" id="date" name="date" type="date" value="${today}" required></div>`;
-        const body = `<form id="transactionForm" class="form-grid" novalidate>${item ? `<input type="hidden" name="id" value="${attr(item.id)}">` : ''}${selectField('type', t('type'), types, item?.type || 'income', translateType)}<div class="form-group"><label class="form-label" for="platform">${t('platform')}</label>${platformInput('platform', item?.platform || '')}</div>${field('name', t('name'), item?.name, 'text', true)}${field('amount', t('amount'), item?.amount, 'number', true)}${dateFields}<p class="form-group full data-note">${item && isTransfer(item) ? t('transferEditHint') : t('transferExcluded')}</p></form>`;
+        const body = `<form id="transactionForm" class="form-grid" novalidate>${item ? `<input type="hidden" name="id" value="${attr(item.id)}">` : ''}${selectField('type', t('type'), types, item?.type || 'income', translateType)}<div class="form-group"><label class="form-label" for="platform">${t('platform')}</label>${platformInput('platform', item?.platform || '', true, '', item?.platformGeneration || '')}</div>${field('name', t('name'), item?.name, 'text', true)}${field('amount', t('amount'), item?.amount, 'number', true)}${dateFields}<p class="form-group full data-note">${item && isTransfer(item) ? t('transferEditHint') : t('transferExcluded')}</p></form>`;
         showModal(item ? t('editTransaction') : t('addIncomeExpense'), t('transactions'), body, `<button class="btn btn-ghost" data-close-modal>${t('cancel')}</button><button class="btn btn-primary" id="saveTransaction">${icon('check')}${item ? t('update') : t('add')}</button>`);
         bindPlatformInputs();
         $('#saveTransaction')?.addEventListener('click', () => saveTransaction(item));
@@ -1775,6 +1806,8 @@
         const button = $('#saveTransfer');
         button.disabled = true;
         try {
+            addPlatformIdentity(values, 'fromPlatform');
+            addPlatformIdentity(values, 'toPlatform');
             await api('/transferBetweenAccounts', {form: values});
             closeModal();
             invalidateFinancialData();
@@ -1795,7 +1828,10 @@
         const btn = $('#saveTransaction');
         if (btn) btn.disabled = true;
         try {
-            await api(item ? '/editIncomeOrExpense' : '/addIncomeOrExpense', {form: new URLSearchParams(new FormData(form))});
+            const values = new URLSearchParams(new FormData(form));
+            if (item) values.set('generation', item.generation);
+            addPlatformIdentity(values, 'platform');
+            await api(item ? '/editIncomeOrExpense' : '/addIncomeOrExpense', {form: values});
             closeModal();
             invalidateFinancialData();
             await renderPage();
@@ -1813,6 +1849,7 @@
                 await api('/deleteIncomeOrExpense', {
                     form: {
                         id: item.id,
+                        generation: item.generation,
                         type: item.type,
                         platform: item.platform,
                         amount: item.amount
@@ -1977,6 +2014,7 @@
         const btn = $('#saveInflationRate');
         if (btn) btn.disabled = true;
         const values = Object.fromEntries(new FormData(form));
+        if (item) values.generation = item.generation;
         if (hasInflationSpan(item)) {
             values.date = item.date;
             values.currency = item.currency;
@@ -1998,7 +2036,7 @@
         if (!item || state.inflation?.canEdit !== true) return;
         showConfirm(t('confirmDelete'), hasInflationSpan(item) ? `${t('inflationSpanDelete')} ${item.date} – ${item.observedThrough}` : t('destructiveDesc'), async () => {
             try {
-                await api('/deleteInflationRate', {form: {id: item.id}});
+                await api('/deleteInflationRate', {form: {id: item.id, generation: item.generation}});
                 await loadInflation(true);
                 state.report = null;
                 renderPage();
