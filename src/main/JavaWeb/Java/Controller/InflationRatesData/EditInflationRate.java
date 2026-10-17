@@ -1,0 +1,26 @@
+package Controller.InflationRatesData;
+
+import Controller.ApiSupport;
+import javax.servlet.annotation.WebServlet;
+import javax.servlet.http.HttpServlet;
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+@WebServlet("/editInflationRate")
+public class EditInflationRate extends HttpServlet {
+    @Override
+    protected void doPost(HttpServletRequest request, HttpServletResponse response) {
+        ApiSupport.serve(request, response, true, (user, input) -> {
+            ApiSupport.requireAdmin(user.getId());
+            String rate = input.has("rate") ? ApiSupport.text(input, "rate") : ApiSupport.text(input, "annualInflationRate");
+            String currency = input.has("currency") ? ApiSupport.text(input, "currency") : ApiSupport.text(input, "variousCurrencies");
+            Model.FixedTypes.Currencies.valueOf(currency);
+            String date = java.time.LocalDate.parse(ApiSupport.text(input, "date")).withDayOfMonth(15).toString();
+            double parsedRate;
+            try { parsedRate = new java.math.BigDecimal(rate).setScale(2, java.math.RoundingMode.UNNECESSARY).doubleValue(); }
+            catch (NumberFormatException | ArithmeticException invalid) { throw new ApiSupport.Failure(400, "Inflation rate must be a number with at most two decimal places."); }
+            try { return ApiSupport.result(Model.Controller.InflationRatesData.EditInflationRate.editInflationRate(ApiSupport.positiveInt(input, "id", -1), parsedRate, currency, date)); }
+            catch (Model.Controller.InflationRatesData.InflationRateException failure) { throw new ApiSupport.Failure(failure.getStatus(), failure.getMessage()); }
+        });
+    }
+}

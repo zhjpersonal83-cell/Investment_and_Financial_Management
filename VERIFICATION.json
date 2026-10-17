@@ -1,0 +1,82 @@
+{
+  "release": "2026-10-17",
+  "archive": "Investment_and_Financial_Management.zip",
+  "rootFolder": "Investment_and_Financial_Management",
+  "url": "https://iafm.zhongjiehuang.com/",
+  "build": {
+    "java": 21,
+    "maven": "3.9.9",
+    "command": "mvn clean package",
+    "javaTests": 70,
+    "pythonTests": 28,
+    "failures": 0,
+    "errors": 0,
+    "warSHA256": "8efedc62d00288197cde029373234b8070f8a04d0bed9a40446fd9b1c4c0a578"
+  },
+  "production": {
+    "restartedAtUTC": "2026-10-17T00:35:54Z",
+    "login": true,
+    "allTenReportCurrencies": true,
+    "allTenInflationCurrencies": true,
+    "sortingBothDirections": true,
+    "internalTransferSeparation": true,
+    "adminRole": true,
+    "nonAdminWritesForbidden": true,
+    "ownerIsolation": true,
+    "invalidOriginsForbidden": true,
+    "logoutInvalidatesSession": true,
+    "temporaryTestIdentityRemoved": true,
+    "driver": "MySQL Connector/J 9.7.0",
+    "runtimeDatabasePrivileges": [
+      "SELECT",
+      "INSERT",
+      "UPDATE",
+      "DELETE"
+    ],
+    "schemaAutoInit": false,
+    "cookies": [
+      "Secure",
+      "HttpOnly",
+      "SameSite=Lax"
+    ],
+    "ledgerCollationMismatch": "Detected in production read smoke test and repaired on the new journal reference column; migration now checks existing collations."
+  },
+  "chrome": {
+    "version": "155.0.8059.82",
+    "mode": "headless Chromium against real production data",
+    "scrollFrames": 120,
+    "averageFrameMs": 16.43,
+    "maxFrameMs": 16.8,
+    "framesOver50ms": 0,
+    "scrollDOMMutations": 0,
+    "scrollExtraAPIRequests": 0,
+    "scrollNavigations": 0,
+    "javaScriptErrors": 0,
+    "consoleErrors": 0,
+    "CSPViolations": 0,
+    "HTTPFailures": 0,
+    "financialWriteRequests": 0
+  },
+  "publicInflation": {
+    "observations": 1096,
+    "compressedSpans": 932,
+    "source": "Trading Economics public chart observations",
+    "missingUSDMonth": "2025-10",
+    "AUDStart": "2025-04",
+    "earliestOtherPublicStarts": [
+      "2016-09",
+      "2016-10"
+    ],
+    "privateDatabaseBackupsExcluded": true
+  },
+  "securityArchiveAudit": {
+    "nestedFilesScanned": 2258,
+    "knownCredentialMatches": 0,
+    "privateFinancialFilesInWAR": 0
+  },
+  "limits": [
+    "Chrome checks are a measured regression run, not a guarantee for every Mac/GPU/browser state.",
+    "No paid inflation history was accessed or missing monthly observation fabricated.",
+    "Application hardening is not an independent penetration-test certification."
+  ]
+}
