@@ -6,9 +6,11 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .env
+.env.*
+!.env.example
 *.pem
 *.key
-# Private financial inputs and credentials belong only in the owner's local package.
+# Private financial inputs stay local; credentials stay outside distribution archives.
 **/private_*.json
 **/*checkpoint*.json
 **/*reconciliation*plan*.json
